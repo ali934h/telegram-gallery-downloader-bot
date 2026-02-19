@@ -171,8 +171,22 @@ class TelegramBot {
     ]));
   }
 
+  async setBotCommands() {
+    try {
+      await this.bot.telegram.setMyCommands([
+        { command: 'start', description: 'Start the bot' },
+        { command: 'help', description: 'How to use this bot' },
+        { command: 'files', description: 'View and manage downloaded files' },
+        { command: 'cancel', description: 'Cancel current operation' }
+      ]);
+      Logger.info('Bot commands menu set successfully');
+    } catch (error) {
+      Logger.warn('Failed to set bot commands', { error: error.message });
+    }
+  }
+
   setupHandlers() {
-    // ── Whitelist middleware ──────────────────────────────────────────────────
+    // ── Whitelist middleware ──────────────────────────────────────────────────────
     this.bot.use(async (ctx, next) => {
       const userId = ctx.from?.id;
       if (!userId) return;
@@ -240,7 +254,7 @@ class TelegramBot {
       keyboard ? ctx.reply(text, keyboard) : ctx.reply(text);
     });
 
-    // ── Name callbacks ────────────────────────────────────────────────────────
+    // ── Name callbacks ────────────────────────────────────────────────────────────
 
     this.bot.action('rename_archive', async (ctx) => {
       const session = this.getUserSession(ctx.from.id);
@@ -266,7 +280,7 @@ class TelegramBot {
       await this.processGalleries(ctx, urls, archiveName);
     });
 
-    // ── Cancel download button ────────────────────────────────────────────────
+    // ── Cancel download button ────────────────────────────────────────────────────
 
     this.bot.action('cancel_download', async (ctx) => {
       const session = this.getUserSession(ctx.from.id);
@@ -277,7 +291,7 @@ class TelegramBot {
       }
     });
 
-    // ── File manager ──────────────────────────────────────────────────────────
+    // ── File manager ──────────────────────────────────────────────────────────────
 
     this.bot.action(/^fi:(\d+)$/, async (ctx) => {
       const idx = parseInt(ctx.match[1]);
@@ -453,7 +467,7 @@ class TelegramBot {
       await ctx.editMessageText(`\u2705 Done. ${deleted} file(s) deleted.`);
     });
 
-    // ── Text handler ──────────────────────────────────────────────────────────
+    // ── Text handler ──────────────────────────────────────────────────────────────
 
     this.bot.on('text', async (ctx) => {
       const session = this.getUserSession(ctx.from.id);
@@ -649,6 +663,7 @@ class TelegramBot {
 
   async initialize() {
     await strategyEngine.loadStrategies();
+    await this.setBotCommands();
     Logger.info('Bot initialized successfully');
     Logger.info(`Download concurrency: ${DOWNLOAD_CONCURRENCY}`);
     if (ALLOWED_USERS.size > 0) {
