@@ -75,10 +75,10 @@ app.get('/', (req, res) => {
 // Initialize bot
 const bot = new TelegramBot(BOT_TOKEN);
 
-// Cleanup scheduler: remove old temp dirs every hour
+// Cleanup scheduler: only remove old TEMP dirs every hour (downloads are kept until manually deleted)
 function scheduleCleanup() {
   setInterval(async () => {
-    Logger.info('Running scheduled cleanup...');
+    Logger.info('Running scheduled temp cleanup...');
     await FileManager.cleanupOldTempDirs();
   }, 60 * 60 * 1000);
 }
@@ -88,7 +88,6 @@ if (NODE_ENV === 'production') {
   const webhookPath = `${WEBHOOK_PATH}/${BOT_TOKEN}`;
   const webhookUrl = `${WEBHOOK_DOMAIN}${webhookPath}`;
 
-  // Load SSL certificates
   const sslOptions = {
     cert: fs.readFileSync(SSL_CERT),
     key: fs.readFileSync(SSL_KEY)
@@ -98,7 +97,6 @@ if (NODE_ENV === 'production') {
     .then((botInstance) => {
       app.use(botInstance.webhookCallback(webhookPath));
 
-      // Create HTTPS server
       const server = https.createServer(sslOptions, app);
 
       server.listen(HTTPS_PORT, () => {
@@ -148,7 +146,6 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 
-// Uncaught exception handler
 process.on('uncaughtException', (error) => {
   Logger.error('Uncaught exception', { error: error.message, stack: error.stack });
   process.exit(1);
