@@ -12,8 +12,17 @@ const JsdomScraper = require('./scrapers/jsdomScraper');
 const ImageDownloader = require('./downloaders/imageDownloader');
 const ZipCreator = require('./downloaders/zipCreator');
 
-const STATE = { IDLE: 'idle', PROCESSING: 'processing' };
+const STATE = {
+  IDLE: 'idle',
+  PROCESSING: 'processing',
+  WAITING_NAME: 'waiting_name'   // waiting for user to type custom archive name
+};
+
 const UPDATE_INTERVAL_MS = 5000;
+
+// Valid archive name: letters, digits, dash, dot, underscore only
+const VALID_NAME_REGEX = /^[a-zA-Z0-9\-._]+$/;
+
 const userSessions = new Map();
 
 const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR || path.join(process.cwd(), 'downloads');
@@ -67,9 +76,6 @@ class TelegramBot {
     ).catch(() => {});
   }
 
-  /**
-   * Get list of ZIP files sorted by date desc
-   */
   getDownloadedFiles() {
     if (!fs.existsSync(DOWNLOADS_DIR)) return [];
     return fs.readdirSync(DOWNLOADS_DIR)
@@ -82,9 +88,6 @@ class TelegramBot {
       .sort((a, b) => b.date - a.date);
   }
 
-  /**
-   * Build the main /files list message + keyboard
-   */
   buildFilesListMessage() {
     const files = this.getDownloadedFiles();
     if (files.length === 0) return { text: 'No downloaded files found.', keyboard: null };
@@ -97,14 +100,42 @@ class TelegramBot {
       msg += `${i + 1}. ${f.name}\n    ${size}  |  ${date}\n\n`;
     });
 
-    // One button per file (tap to manage)
     const buttons = files.map((f, i) =>
       [Markup.button.callback(`📂 ${i + 1}. ${f.name.substring(0, 38)}`, `file:${f.name}`)]
     );
-    // Manage All button at bottom
     buttons.push([Markup.button.callback('⚙️ Manage All Files', 'manage_all')]);
 
     return { text: msg, keyboard: Markup.inlineKeyboard(buttons) };
+  }
+
+  /**
+   * Generate default archive name from URLs
+   * Uses slug of first gallery + timestamp
+   */
+  buildDefaultName(urls) {
+    const slug = JsdomScraper.extractGalleryName(urls[0]).substring(0, 30);
+    const ts = Date.now();
+    return `${slug}_${ts}`;
+  }
+
+  /**
+   * Send the name-selection prompt
+   */
+  async sendNamePrompt(ctx, session) {
+    const defaultName = session.pendingJob.archiveName;
+    const msg =
+      `📝 Archive name:\n\n` +
+      `Default: \`${defaultName}\`\n\n` +
+      `Tap “Start Download” to use it, or “Rename” to choose a custom name.\n\n` +
+      `Allowed characters: letters, numbers, \`-\` \`_\` \`.\``;
+
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('✅ Start Download', 'start_download')],
+      [Markup.button.callback('✏️ Rename', 'rename_archive')]
+    ]);
+
+    const sent = await ctx.reply(msg, { parse_mode: 'Markdown', ...keyboard });
+    session.pendingJob.promptMsgId = sent.message_id;
   }
 
   setupHandlers() {
@@ -132,11 +163,10 @@ class TelegramBot {
     this.bot.command('help', (ctx) => {
       ctx.reply(
         'How to use:\n\n' +
-        '1. Send one or more gallery URLs, one per line:\n\n' +
-        '   https://example.com/gallery/gallery-one\n' +
-        '   https://example.com/gallery/gallery-two\n\n' +
-        '2. Wait while the bot downloads and packages all images.\n\n' +
-        '3. Receive your ZIP download link.\n\n' +
+        '1. Send one or more gallery URLs, one per line.\n\n' +
+        '2. Choose a name for the ZIP archive (or use the default).\n\n' +
+        '3. Tap “Start Download” and wait.\n\n' +
+        '4. Receive your download link.\n\n' +
         'Commands:\n' +
         '  /files  - View and manage downloaded ZIP files\n' +
         '  /cancel - Cancel current operation\n\n' +
@@ -152,31 +182,56 @@ class TelegramBot {
         ctx.reply('A job is currently running. Please wait for it to finish.');
       } else {
         session.state = STATE.IDLE;
-        ctx.reply('Ready. Send me gallery URLs to start.');
+        session.pendingJob = null;
+        ctx.reply('Cancelled. Ready for new URLs.');
       }
     });
 
-    // /files — main file manager
+    // /files
     this.bot.command('files', (ctx) => {
       const { text, keyboard } = this.buildFilesListMessage();
-      if (keyboard) {
-        ctx.reply(text, keyboard);
-      } else {
-        ctx.reply(text);
-      }
+      keyboard ? ctx.reply(text, keyboard) : ctx.reply(text);
     });
 
-    // ────────────────────────────────────────────────────────────────────
-    // Callback: open single file management menu
+    // ── Name selection callbacks ─────────────────────────────────────────────
+
+    // Callback: user wants to rename
+    this.bot.action('rename_archive', async (ctx) => {
+      const session = this.getUserSession(ctx.from.id);
+      await ctx.answerCbQuery();
+      session.state = STATE.WAITING_NAME;
+      await ctx.editMessageText(
+        '✏️ Type your custom archive name:\n\n' +
+        'Allowed: letters, numbers, `-` `_` `.`\n' +
+        'Example: `my-gallery_2026`',
+        { parse_mode: 'Markdown' }
+      );
+    });
+
+    // Callback: start download with current name
+    this.bot.action('start_download', async (ctx) => {
+      const session = this.getUserSession(ctx.from.id);
+      await ctx.answerCbQuery();
+
+      if (!session.pendingJob) {
+        await ctx.editMessageText('Session expired. Please send the URLs again.');
+        return;
+      }
+
+      await ctx.deleteMessage().catch(() => {});
+      await this.processGalleries(ctx, session.pendingJob.urls, session.pendingJob.archiveName);
+      session.pendingJob = null;
+    });
+
+    // ── File manager callbacks ──────────────────────────────────────────────
+
     this.bot.action(/^file:(.+)$/, async (ctx) => {
       const fileName = ctx.match[1];
       const filePath = path.join(DOWNLOADS_DIR, fileName);
-
       if (!fs.existsSync(filePath)) {
         await ctx.answerCbQuery('File not found.');
         return;
       }
-
       const stats = fs.statSync(filePath);
       const size = FileManager.formatBytes(stats.size);
       const date = stats.mtime.toISOString().slice(0, 16).replace('T', ' ');
@@ -190,7 +245,6 @@ class TelegramBot {
         `Link:\n\`${downloadUrl}\``;
 
       const keyboard = Markup.inlineKeyboard([
-        [Markup.button.callback('🔗 Copy Download Link', `link:${fileName}`)],
         [Markup.button.callback('🗑 Delete This File', `confirm_del:${fileName}`)],
         [Markup.button.callback('⬅️ Back to List', 'back_to_list')]
       ]);
@@ -199,15 +253,6 @@ class TelegramBot {
       await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...keyboard });
     });
 
-    // Callback: send download link as separate copyable message
-    this.bot.action(/^link:(.+)$/, async (ctx) => {
-      const fileName = ctx.match[1];
-      const downloadUrl = `${DOWNLOAD_BASE_URL}/${fileName}`;
-      await ctx.answerCbQuery('Link sent!');
-      await ctx.reply(`\`${downloadUrl}\``, { parse_mode: 'Markdown' });
-    });
-
-    // Callback: confirm delete single file
     this.bot.action(/^confirm_del:(.+)$/, async (ctx) => {
       const fileName = ctx.match[1];
       await ctx.answerCbQuery();
@@ -220,17 +265,13 @@ class TelegramBot {
       );
     });
 
-    // Callback: execute single file delete
     this.bot.action(/^do_del:(.+)$/, async (ctx) => {
       const fileName = ctx.match[1];
       const filePath = path.join(DOWNLOADS_DIR, fileName);
-
       try {
         await FileManager.deleteFile(filePath);
         Logger.info(`File deleted: ${fileName}`);
         await ctx.answerCbQuery('File deleted.');
-
-        // Go back to updated file list
         const files = this.getDownloadedFiles();
         if (files.length === 0) {
           await ctx.editMessageText('✅ File deleted. No more files.');
@@ -244,27 +285,18 @@ class TelegramBot {
       }
     });
 
-    // Callback: back to file list
     this.bot.action('back_to_list', async (ctx) => {
       await ctx.answerCbQuery();
       const { text, keyboard } = this.buildFilesListMessage();
-      if (keyboard) {
-        await ctx.editMessageText(text, keyboard);
-      } else {
-        await ctx.editMessageText(text);
-      }
+      keyboard ? await ctx.editMessageText(text, keyboard) : await ctx.editMessageText(text);
     });
 
-    // ────────────────────────────────────────────────────────────────────
-    // Callback: manage all files menu
     this.bot.action('manage_all', async (ctx) => {
       const files = this.getDownloadedFiles();
       const totalSize = FileManager.formatBytes(files.reduce((sum, f) => sum + f.size, 0));
       await ctx.answerCbQuery();
       await ctx.editMessageText(
-        `⚙️ Manage All Files\n\n` +
-        `Total: ${files.length} file(s), ${totalSize}\n\n` +
-        `This will permanently delete all downloaded ZIP files.`,
+        `⚙️ Manage All Files\n\nTotal: ${files.length} file(s), ${totalSize}\n\nThis will permanently delete all downloaded ZIP files.`,
         Markup.inlineKeyboard([
           [Markup.button.callback('🗑 Delete ALL Files', 'confirm_del_all')],
           [Markup.button.callback('⬅️ Back to List', 'back_to_list')]
@@ -272,7 +304,6 @@ class TelegramBot {
       );
     });
 
-    // Callback: confirm delete all
     this.bot.action('confirm_del_all', async (ctx) => {
       const files = this.getDownloadedFiles();
       await ctx.answerCbQuery();
@@ -285,35 +316,69 @@ class TelegramBot {
       );
     });
 
-    // Callback: execute delete all
     this.bot.action('do_del_all', async (ctx) => {
       const files = this.getDownloadedFiles();
       let deleted = 0;
-
       for (const f of files) {
         try {
           await FileManager.deleteFile(path.join(DOWNLOADS_DIR, f.name));
           deleted++;
         } catch (error) {
-          Logger.error(`Failed to delete file: ${f.name}`, { error: error.message });
+          Logger.error(`Failed to delete: ${f.name}`, { error: error.message });
         }
       }
-
       Logger.info(`Bulk delete: ${deleted}/${files.length} files removed`);
       await ctx.answerCbQuery(`Deleted ${deleted} file(s).`);
       await ctx.editMessageText(`✅ Done. ${deleted} file(s) deleted.`);
     });
 
-    // ────────────────────────────────────────────────────────────────────
-    // Text message handler — gallery URLs
+    // ── Text message handler ───────────────────────────────────────────────
+
     this.bot.on('text', async (ctx) => {
       const session = this.getUserSession(ctx.from.id);
 
+      // ─ User is typing a custom archive name
+      if (session.state === STATE.WAITING_NAME) {
+        const input = ctx.message.text.trim();
+
+        if (!VALID_NAME_REGEX.test(input)) {
+          ctx.reply(
+            '❌ Invalid name. Only letters, numbers, `-` `_` `.` are allowed.\n\n' +
+            'Please type a valid name:',
+            { parse_mode: 'Markdown' }
+          );
+          return;
+        }
+
+        if (input.length < 2 || input.length > 80) {
+          ctx.reply('❌ Name must be between 2 and 80 characters. Try again:');
+          return;
+        }
+
+        // Name accepted
+        session.pendingJob.archiveName = input;
+        session.state = STATE.IDLE;
+
+        await ctx.reply(
+          `✅ Name set to: \`${input}\`\n\nReady to download.`,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [Markup.button.callback('✅ Start Download', 'start_download')],
+              [Markup.button.callback('✏️ Rename Again', 'rename_archive')]
+            ])
+          }
+        );
+        return;
+      }
+
+      // ─ Already processing
       if (session.state === STATE.PROCESSING) {
         ctx.reply('Already processing a job. Please wait until it finishes.');
         return;
       }
 
+      // ─ Parse gallery URLs
       const lines = ctx.message.text
         .split('\n')
         .map(l => l.trim())
@@ -334,7 +399,12 @@ class TelegramBot {
         return;
       }
 
-      await this.processGalleries(ctx, lines);
+      // ─ Store pending job and ask for archive name
+      const defaultName = this.buildDefaultName(lines);
+      session.pendingJob = { urls: lines, archiveName: defaultName, promptMsgId: null };
+      session.state = STATE.IDLE;
+
+      await this.sendNamePrompt(ctx, session);
     });
 
     // Error handler
@@ -342,11 +412,14 @@ class TelegramBot {
       Logger.error('Unhandled bot error', { error: err.message, user: ctx.from?.id });
       ctx.reply('An unexpected error occurred. Please try again or send /start to reset.').catch(() => {});
       const session = this.getUserSession(ctx.from?.id);
-      if (session) session.state = STATE.IDLE;
+      if (session) { session.state = STATE.IDLE; session.pendingJob = null; }
     });
   }
 
-  async processGalleries(ctx, urls) {
+  /**
+   * Main download pipeline
+   */
+  async processGalleries(ctx, urls, archiveName) {
     const session = this.getUserSession(ctx.from.id);
     session.state = STATE.PROCESSING;
 
@@ -404,7 +477,6 @@ class TelegramBot {
       if (downloadResult.successImages === 0) throw new Error('Failed to download any images.');
 
       await this.updateStatus(ctx, msgId, 'Creating ZIP archive...');
-      const archiveName = `galleries_${ctx.from.id}`;
       zipPath = await ZipCreator.createZip(tempDir, archiveName, DOWNLOADS_DIR);
 
       await this.updateStatus(ctx, msgId, 'Generating download link...');
