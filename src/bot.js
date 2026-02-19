@@ -26,6 +26,29 @@ const userSessions = new Map();
 const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR || path.join(process.cwd(), 'downloads');
 const DOWNLOAD_BASE_URL = process.env.DOWNLOAD_BASE_URL || 'http://localhost:3000/downloads';
 
+/**
+ * Escape special characters for MarkdownV2
+ */
+function escapeV2(text) {
+  return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
+}
+
+/**
+ * Send a URL as a copyable code block (MarkdownV2)
+ * disable_web_page_preview stops Telegram from uploading/previewing the file
+ */
+async function sendLink(ctx, summaryText, url) {
+  const escapedSummary = escapeV2(summaryText);
+  const escapedUrl = escapeV2(url);
+  await ctx.reply(
+    `${escapedSummary}\n\n\`\`\`\n${escapedUrl}\n\`\`\``,
+    {
+      parse_mode: 'MarkdownV2',
+      disable_web_page_preview: true
+    }
+  );
+}
+
 class TelegramBot {
   constructor(token) {
     this.bot = new Telegraf(token, {
@@ -114,7 +137,6 @@ class TelegramBot {
 
   async sendNamePrompt(ctx, session) {
     const defaultName = session.pendingJob.archiveName;
-    // No parse_mode — plain text to avoid Markdown conflicts with underscores/dots
     const msg =
       `\u{1F4DD} Archive name:\n\n` +
       `Default: ${defaultName}\n\n` +
@@ -130,7 +152,6 @@ class TelegramBot {
   }
 
   setupHandlers() {
-    // /start
     this.bot.start((ctx) => {
       const session = this.getUserSession(ctx.from.id);
       session.state = STATE.IDLE;
@@ -150,7 +171,6 @@ class TelegramBot {
       );
     });
 
-    // /help
     this.bot.command('help', (ctx) => {
       ctx.reply(
         'How to use:\n\n' +
@@ -166,7 +186,6 @@ class TelegramBot {
       );
     });
 
-    // /cancel
     this.bot.command('cancel', (ctx) => {
       const session = this.getUserSession(ctx.from.id);
       if (session.state === STATE.PROCESSING) {
@@ -178,13 +197,12 @@ class TelegramBot {
       }
     });
 
-    // /files
     this.bot.command('files', (ctx) => {
       const { text, keyboard } = this.buildFilesListMessage();
       keyboard ? ctx.reply(text, keyboard) : ctx.reply(text);
     });
 
-    // ── Name callbacks ────────────────────────────────────────────────────────
+    // ── Name callbacks ───────────────────────────────────────────────────
 
     this.bot.action('rename_archive', async (ctx) => {
       const session = this.getUserSession(ctx.from.id);
@@ -228,13 +246,14 @@ class TelegramBot {
       const date = f.date.toISOString().slice(0, 16).replace('T', ' ');
       const downloadUrl = `${DOWNLOAD_BASE_URL}/${f.name}`;
 
-      // Plain text — no parse_mode to avoid Markdown issues with special chars
+      // MarkdownV2: name/size/date as plain escaped text, URL in code block
       const msg =
-        `\u{1F4C2} File Details:\n\n` +
-        `Name: ${f.name}\n` +
-        `Size: ${size}\n` +
-        `Date: ${date}\n\n` +
-        `Link:\n${downloadUrl}`;
+        `\u{1F4C2} *File Details*\n\n` +
+        `Name: \`${escapeV2(f.name)}\`\n` +
+        `Size: ${escapeV2(size)}\n` +
+        `Date: ${escapeV2(date)}\n\n` +
+        `*Link \(tap to copy\):*\n` +
+        `\`\`\`\n${escapeV2(downloadUrl)}\n\`\`\``;
 
       const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback('\u{1F5D1} Delete This File', `cd:${idx}`)],
@@ -242,7 +261,11 @@ class TelegramBot {
       ]);
 
       await ctx.answerCbQuery();
-      await ctx.editMessageText(msg, keyboard);
+      await ctx.editMessageText(msg, {
+        parse_mode: 'MarkdownV2',
+        disable_web_page_preview: true,
+        ...keyboard
+      });
     });
 
     this.bot.action(/^cd:(\d+)$/, async (ctx) => {
@@ -336,15 +359,13 @@ class TelegramBot {
       await ctx.editMessageText(`\u2705 Done. ${deleted} file(s) deleted.`);
     });
 
-    // ── Text handler ───────────────────────────────────────────────────────────
+    // ── Text handler ─────────────────────────────────────────────────────────
 
     this.bot.on('text', async (ctx) => {
       const session = this.getUserSession(ctx.from.id);
 
-      // Waiting for custom archive name
       if (session.state === STATE.WAITING_NAME) {
         const input = ctx.message.text.trim();
-
         if (!VALID_NAME_REGEX.test(input)) {
           ctx.reply('\u274C Invalid name. Only letters, numbers, - _ . are allowed.\n\nPlease type a valid name:');
           return;
@@ -353,10 +374,8 @@ class TelegramBot {
           ctx.reply('\u274C Name must be between 2 and 80 characters. Try again:');
           return;
         }
-
         session.pendingJob.archiveName = input;
         session.state = STATE.IDLE;
-
         await ctx.reply(
           `\u2705 Name set to: ${input}\n\nReady to download.`,
           Markup.inlineKeyboard([
@@ -466,18 +485,22 @@ class TelegramBot {
       await this.updateStatus(ctx, msgId, 'Creating ZIP archive...');
       zipPath = await ZipCreator.createZip(tempDir, archiveName, DOWNLOADS_DIR);
 
-      await this.updateStatus(ctx, msgId, 'Generating download link...');
       const zipFileName = path.basename(zipPath);
       const downloadUrl = `${DOWNLOAD_BASE_URL}/${zipFileName}`;
       const stats = fs.statSync(zipPath);
       const fileSize = FileManager.formatBytes(stats.size);
 
-      // Plain text for the final message — URL contains special chars, no parse_mode needed
+      const summary =
+        `\u2705 Done\! ${downloadResult.totalGalleries} ${downloadResult.totalGalleries === 1 ? 'gallery' : 'galleries'}, ` +
+        `${downloadResult.successImages} images, ${escapeV2(fileSize)}`;
+
       await this.retryWithBackoff(() =>
         ctx.reply(
-          `\u2705 Done! ${downloadResult.totalGalleries} ${downloadResult.totalGalleries === 1 ? 'gallery' : 'galleries'}, ` +
-          `${downloadResult.successImages} images, ${fileSize}\n\n` +
-          `${downloadUrl}`
+          `${summary}\n\n\`\`\`\n${escapeV2(downloadUrl)}\n\`\`\``,
+          {
+            parse_mode: 'MarkdownV2',
+            disable_web_page_preview: true
+          }
         )
       );
 
