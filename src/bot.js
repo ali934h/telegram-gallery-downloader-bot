@@ -25,6 +25,7 @@ const userSessions = new Map();
 
 const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR || path.join(process.cwd(), 'downloads');
 const DOWNLOAD_BASE_URL = process.env.DOWNLOAD_BASE_URL || 'http://localhost:3000/downloads';
+const DOWNLOAD_CONCURRENCY = parseInt(process.env.DOWNLOAD_CONCURRENCY) || 5;
 
 /**
  * Parse ALLOWED_USERS env variable into a Set of numeric IDs.
@@ -171,20 +172,19 @@ class TelegramBot {
   }
 
   setupHandlers() {
-    // ── Whitelist middleware ─────────────────────────────────────────────────
+    // ── Whitelist middleware ──────────────────────────────────────────────────
     this.bot.use(async (ctx, next) => {
       const userId = ctx.from?.id;
       if (!userId) return;
 
       if (!isAllowed(userId)) {
         Logger.warn(`Unauthorized access attempt by user: ${userId}`);
-        // Answer inline queries silently; reply to messages
         if (ctx.callbackQuery) {
           await ctx.answerCbQuery('\u26D4 Access denied.').catch(() => {});
         } else {
           await ctx.reply('\u26D4 You are not authorized to use this bot.').catch(() => {});
         }
-        return; // do NOT call next()
+        return;
       }
 
       return next();
@@ -240,7 +240,7 @@ class TelegramBot {
       keyboard ? ctx.reply(text, keyboard) : ctx.reply(text);
     });
 
-    // ── Name callbacks ────────────────────────────────────────────────────
+    // ── Name callbacks ────────────────────────────────────────────────────────
 
     this.bot.action('rename_archive', async (ctx) => {
       const session = this.getUserSession(ctx.from.id);
@@ -266,7 +266,7 @@ class TelegramBot {
       await this.processGalleries(ctx, urls, archiveName);
     });
 
-    // ── Cancel download button ────────────────────────────────────────────
+    // ── Cancel download button ────────────────────────────────────────────────
 
     this.bot.action('cancel_download', async (ctx) => {
       const session = this.getUserSession(ctx.from.id);
@@ -277,7 +277,7 @@ class TelegramBot {
       }
     });
 
-    // ── File manager ──────────────────────────────────────────────────────
+    // ── File manager ──────────────────────────────────────────────────────────
 
     this.bot.action(/^fi:(\d+)$/, async (ctx) => {
       const idx = parseInt(ctx.match[1]);
@@ -325,7 +325,6 @@ class TelegramBot {
       });
     });
 
-    // Gallery source URLs
     this.bot.action(/^src:(\d+)$/, async (ctx) => {
       const idx = parseInt(ctx.match[1]);
       const files = this.getDownloadedFiles();
@@ -362,7 +361,6 @@ class TelegramBot {
       });
     });
 
-    // Confirm delete single
     this.bot.action(/^cd:(\d+)$/, async (ctx) => {
       const idx = parseInt(ctx.match[1]);
       const files = this.getDownloadedFiles();
@@ -381,7 +379,6 @@ class TelegramBot {
       );
     });
 
-    // Execute delete single
     this.bot.action(/^dd:(\d+)$/, async (ctx) => {
       const idx = parseInt(ctx.match[1]);
       const files = this.getDownloadedFiles();
@@ -456,7 +453,7 @@ class TelegramBot {
       await ctx.editMessageText(`\u2705 Done. ${deleted} file(s) deleted.`);
     });
 
-    // ── Text handler ──────────────────────────────────────────────────────
+    // ── Text handler ──────────────────────────────────────────────────────────
 
     this.bot.on('text', async (ctx) => {
       const session = this.getUserSession(ctx.from.id);
@@ -592,7 +589,8 @@ class TelegramBot {
             ).catch(() => {});
           }
         },
-        signal
+        signal,
+        DOWNLOAD_CONCURRENCY
       );
 
       if (downloadResult.successImages === 0) {
@@ -652,6 +650,7 @@ class TelegramBot {
   async initialize() {
     await strategyEngine.loadStrategies();
     Logger.info('Bot initialized successfully');
+    Logger.info(`Download concurrency: ${DOWNLOAD_CONCURRENCY}`);
     if (ALLOWED_USERS.size > 0) {
       Logger.info(`Whitelist active: ${ALLOWED_USERS.size} allowed user(s): ${[...ALLOWED_USERS].join(', ')}`);
     } else {

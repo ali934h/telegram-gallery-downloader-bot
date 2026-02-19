@@ -27,12 +27,12 @@ echo -e "${GREEN}║     Gallery Downloader Bot - Installer       ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
 echo -e ""
 
-# ── Root check ──────────────────────────────────────────────
+# ── Root check ─────────────────────────────────────────────────────────────
 if [[ $EUID -ne 0 ]]; then
   err "This script must be run as root (sudo -i)"
 fi
 
-# ── Collect configuration ────────────────────────────────────
+# ── Collect configuration ──────────────────────────────────────────────────
 echo -e "${YELLOW}Please answer the following questions:${NC}\n"
 
 ask "Bot Token (from @BotFather):"
@@ -55,6 +55,10 @@ read -r SSL_KEY
 ask "Allowed Telegram user IDs (comma-separated, leave empty to allow everyone):"
 read -r ALLOWED_USERS
 
+ask "Download concurrency (1-20, default: 5):"
+read -r DOWNLOAD_CONCURRENCY
+DOWNLOAD_CONCURRENCY=${DOWNLOAD_CONCURRENCY:-5}
+
 ask "Downloads directory (default: /root/gallery-downloads):"
 read -r DOWNLOADS_DIR
 DOWNLOADS_DIR=${DOWNLOADS_DIR:-/root/gallery-downloads}
@@ -67,20 +71,21 @@ echo    "  Domain      : $WEBHOOK_DOMAIN"
 echo    "  SSL Cert    : $SSL_CERT"
 echo    "  SSL Key     : $SSL_KEY"
 echo    "  Downloads   : $DOWNLOADS_DIR"
+echo    "  Concurrency : $DOWNLOAD_CONCURRENCY"
 echo    "  Allowed IDs : ${ALLOWED_USERS:-<everyone>}"
 echo ""
 ask "Proceed with installation? [Y/n]:"
 read -r CONFIRM
 [[ "$CONFIRM" =~ ^[Nn]$ ]] && { warn "Aborted."; exit 0; }
 
-# ── System dependencies ──────────────────────────────────────
+# ── System dependencies ────────────────────────────────────────────────────
 log "Updating package list..."
 apt-get update -qq
 
 log "Installing dependencies (curl, git, unzip)..."
 apt-get install -y -qq curl git unzip
 
-# ── Node.js ──────────────────────────────────────────────────
+# ── Node.js ────────────────────────────────────────────────────────────────
 if command -v node &>/dev/null; then
   NODE_VER=$(node -v)
   log "Node.js already installed: $NODE_VER"
@@ -91,7 +96,7 @@ else
   log "Node.js installed: $(node -v)"
 fi
 
-# ── PM2 ──────────────────────────────────────────────────────
+# ── PM2 ────────────────────────────────────────────────────────────────────
 if command -v pm2 &>/dev/null; then
   log "PM2 already installed: $(pm2 -v)"
 else
@@ -100,7 +105,7 @@ else
   log "PM2 installed."
 fi
 
-# ── Clone / update repo ──────────────────────────────────────
+# ── Clone / update repo ────────────────────────────────────────────────────
 if [[ -d "$INSTALL_DIR/.git" ]]; then
   warn "Existing installation found at $INSTALL_DIR. Updating..."
   cd "$INSTALL_DIR"
@@ -111,15 +116,15 @@ else
   cd "$INSTALL_DIR"
 fi
 
-# ── npm install ───────────────────────────────────────────────
+# ── npm install ────────────────────────────────────────────────────────────
 log "Installing npm packages..."
 npm install --silent
 
-# ── Downloads directory ───────────────────────────────────────
+# ── Downloads directory ────────────────────────────────────────────────────
 log "Creating downloads directory: $DOWNLOADS_DIR"
 mkdir -p "$DOWNLOADS_DIR"
 
-# ── Write .env ────────────────────────────────────────────────
+# ── Write .env ─────────────────────────────────────────────────────────────
 log "Writing .env file..."
 cat > "$INSTALL_DIR/.env" << EOF
 # Telegram
@@ -143,12 +148,15 @@ SSL_KEY=${SSL_KEY}
 
 # Whitelist (comma-separated user IDs, empty = everyone)
 ALLOWED_USERS=${ALLOWED_USERS}
+
+# Download concurrency (parallel image downloads per gallery)
+DOWNLOAD_CONCURRENCY=${DOWNLOAD_CONCURRENCY}
 EOF
 
 chmod 600 "$INSTALL_DIR/.env"
 log ".env written and secured (chmod 600)."
 
-# ── Start / restart with PM2 ─────────────────────────────────
+# ── Start / restart with PM2 ───────────────────────────────────────────────
 cd "$INSTALL_DIR"
 
 if pm2 list | grep -q "gallery-bot"; then
@@ -165,7 +173,7 @@ pm2 save
 log "Enabling PM2 on system startup..."
 pm2 startup systemd -u root --hp /root 2>/dev/null | tail -1 | bash 2>/dev/null || true
 
-# ── Done ─────────────────────────────────────────────────────
+# ── Done ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║           Installation Complete!             ║${NC}"
@@ -174,6 +182,7 @@ echo ""
 echo -e "  Bot URL    : ${WEBHOOK_DOMAIN}"
 echo -e "  Install dir: ${INSTALL_DIR}"
 echo -e "  Downloads  : ${DOWNLOADS_DIR}"
+echo -e "  Concurrency: ${DOWNLOAD_CONCURRENCY}"
 echo ""
 echo -e "  Useful commands:"
 echo -e "    pm2 logs gallery-bot     # view live logs"

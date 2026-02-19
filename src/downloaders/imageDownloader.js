@@ -65,9 +65,10 @@ class ImageDownloader {
 
   /**
    * @param {AbortSignal} [signal]
+   * @param {number} [concurrency] - Max parallel downloads (default 5)
    */
   static async downloadImages(urls, outputDir, concurrency = 5, progressCallback = null, signal = null) {
-    Logger.info(`Starting download of ${urls.length} images`);
+    Logger.info(`Starting download of ${urls.length} images with concurrency ${concurrency}`);
 
     const results = { total: urls.length, success: 0, failed: 0, files: [] };
 
@@ -110,9 +111,10 @@ class ImageDownloader {
 
   /**
    * @param {AbortSignal} [signal]
+   * @param {number} [concurrency] - Max parallel downloads per gallery (default 5)
    */
-  static async downloadMultipleGalleries(galleries, baseOutputDir, progressCallback = null, signal = null) {
-    Logger.info(`Downloading ${galleries.length} galleries`);
+  static async downloadMultipleGalleries(galleries, baseOutputDir, progressCallback = null, signal = null, concurrency = 5) {
+    Logger.info(`Downloading ${galleries.length} galleries with concurrency ${concurrency}`);
 
     const results = {
       totalGalleries: galleries.length,
@@ -137,7 +139,7 @@ class ImageDownloader {
       const galleryResult = await this.downloadImages(
         gallery.urls,
         galleryDir,
-        5,
+        concurrency,
         (progress) => {
           if (progressCallback) {
             progressCallback({
