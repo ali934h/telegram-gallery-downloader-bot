@@ -1,11 +1,14 @@
 /**
  * Application Entry Point
- * Express server with webhook support (production) or polling (development)
+ * HTTPS server in production (webhook) or HTTP with polling in development
  * Serves downloaded ZIP files as static files
  */
 
 require('dotenv').config();
 const express = require('express');
+const https = require('https');
+const http = require('http');
+const fs = require('fs');
 const path = require('path');
 const TelegramBot = require('./bot');
 const Logger = require('./utils/logger');
@@ -13,11 +16,14 @@ const FileManager = require('./utils/fileManager');
 
 // Configuration
 const PORT = process.env.PORT || 3000;
+const HTTPS_PORT = process.env.HTTPS_PORT || 443;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN;
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH || '/webhook';
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR || path.join(process.cwd(), 'downloads');
+const SSL_CERT = process.env.SSL_CERT;
+const SSL_KEY = process.env.SSL_KEY;
 
 // Validate required environment variables
 if (!BOT_TOKEN) {
@@ -25,9 +31,19 @@ if (!BOT_TOKEN) {
   process.exit(1);
 }
 
-if (NODE_ENV === 'production' && !WEBHOOK_DOMAIN) {
-  Logger.error('WEBHOOK_DOMAIN is required in production mode');
-  process.exit(1);
+if (NODE_ENV === 'production') {
+  if (!WEBHOOK_DOMAIN) {
+    Logger.error('WEBHOOK_DOMAIN is required in production mode');
+    process.exit(1);
+  }
+  if (!SSL_CERT || !SSL_KEY) {
+    Logger.error('SSL_CERT and SSL_KEY paths are required in production mode');
+    process.exit(1);
+  }
+  if (!fs.existsSync(SSL_CERT) || !fs.existsSync(SSL_KEY)) {
+    Logger.error('SSL certificate or key file not found', { cert: SSL_CERT, key: SSL_KEY });
+    process.exit(1);
+  }
 }
 
 // Create Express app
@@ -59,7 +75,7 @@ app.get('/', (req, res) => {
 // Initialize bot
 const bot = new TelegramBot(BOT_TOKEN);
 
-// Cleanup scheduler: remove old temp dirs and downloads every hour
+// Cleanup scheduler: remove old temp dirs every hour
 function scheduleCleanup() {
   setInterval(async () => {
     Logger.info('Running scheduled cleanup...');
@@ -67,20 +83,34 @@ function scheduleCleanup() {
   }, 60 * 60 * 1000);
 }
 
-// Start in production mode (webhook)
+// Start in production mode (HTTPS + webhook)
 if (NODE_ENV === 'production') {
   const webhookPath = `${WEBHOOK_PATH}/${BOT_TOKEN}`;
   const webhookUrl = `${WEBHOOK_DOMAIN}${webhookPath}`;
+
+  // Load SSL certificates
+  const sslOptions = {
+    cert: fs.readFileSync(SSL_CERT),
+    key: fs.readFileSync(SSL_KEY)
+  };
 
   bot.startWebhook(WEBHOOK_DOMAIN, webhookPath)
     .then((botInstance) => {
       app.use(botInstance.webhookCallback(webhookPath));
 
-      app.listen(PORT, () => {
-        Logger.info(`Server started in PRODUCTION mode on port ${PORT}`);
+      // Create HTTPS server
+      const server = https.createServer(sslOptions, app);
+
+      server.listen(HTTPS_PORT, () => {
+        Logger.info(`HTTPS server started in PRODUCTION mode on port ${HTTPS_PORT}`);
         Logger.info(`Webhook URL: ${webhookUrl}`);
         Logger.info(`Downloads served at: ${WEBHOOK_DOMAIN}/downloads`);
         scheduleCleanup();
+      });
+
+      server.on('error', (error) => {
+        Logger.error('HTTPS server error', { error: error.message });
+        process.exit(1);
       });
     })
     .catch((error) => {
@@ -88,14 +118,15 @@ if (NODE_ENV === 'production') {
       process.exit(1);
     });
 
-// Start in development mode (polling)
+// Start in development mode (HTTP + polling)
 } else {
   bot.startPolling()
     .then(() => {
       Logger.info('Bot started in DEVELOPMENT mode with polling');
 
-      app.listen(PORT, () => {
-        Logger.info(`Express server running on port ${PORT}`);
+      const server = http.createServer(app);
+      server.listen(PORT, () => {
+        Logger.info(`HTTP server running on port ${PORT}`);
         Logger.info(`Downloads served at: http://localhost:${PORT}/downloads`);
         scheduleCleanup();
       });
