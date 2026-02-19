@@ -1,0 +1,35 @@
+{
+  "name": "telegram-gallery-downloader-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for downloading gallery images from multiple URLs, with parallel downloading and ZIP output",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "gallery",
+    "scraper",
+    "jsdom",
+    "downloader",
+    "zip"
+  ],
+  "author": "ali hosseini",
+  "license": "MIT",
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "express": "^4.18.2",
+    "dotenv": "^16.4.1",
+    "axios": "^1.6.7",
+    "jsdom": "^24.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.3"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  }
+}
