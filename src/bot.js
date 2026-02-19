@@ -26,6 +26,20 @@ const userSessions = new Map();
 const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR || path.join(process.cwd(), 'downloads');
 const DOWNLOAD_BASE_URL = process.env.DOWNLOAD_BASE_URL || 'http://localhost:3000/downloads';
 
+/**
+ * Parse ALLOWED_USERS env variable into a Set of numeric IDs.
+ * If empty or not set, the Set is empty — meaning everyone is allowed.
+ */
+const ALLOWED_USERS = new Set(
+  (process.env.ALLOWED_USERS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(Number)
+);
+
+const isAllowed = (userId) => ALLOWED_USERS.size === 0 || ALLOWED_USERS.has(userId);
+
 /** Escape all MarkdownV2 reserved characters */
 function e(text) {
   return String(text).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
@@ -157,6 +171,25 @@ class TelegramBot {
   }
 
   setupHandlers() {
+    // ── Whitelist middleware ─────────────────────────────────────────────────
+    this.bot.use(async (ctx, next) => {
+      const userId = ctx.from?.id;
+      if (!userId) return;
+
+      if (!isAllowed(userId)) {
+        Logger.warn(`Unauthorized access attempt by user: ${userId}`);
+        // Answer inline queries silently; reply to messages
+        if (ctx.callbackQuery) {
+          await ctx.answerCbQuery('\u26D4 Access denied.').catch(() => {});
+        } else {
+          await ctx.reply('\u26D4 You are not authorized to use this bot.').catch(() => {});
+        }
+        return; // do NOT call next()
+      }
+
+      return next();
+    });
+
     this.bot.start((ctx) => {
       const session = this.getUserSession(ctx.from.id);
       session.state = STATE.IDLE;
@@ -238,7 +271,6 @@ class TelegramBot {
     this.bot.action('cancel_download', async (ctx) => {
       const session = this.getUserSession(ctx.from.id);
       await ctx.answerCbQuery('Cancelling...');
-
       if (session.abortController) {
         session.abortController.abort();
         Logger.info(`User ${ctx.from.id} cancelled download`);
@@ -494,7 +526,6 @@ class TelegramBot {
     const session = this.getUserSession(ctx.from.id);
     session.state = STATE.PROCESSING;
 
-    // Create AbortController for this job
     const abortController = new AbortController();
     session.abortController = abortController;
     const { signal } = abortController;
@@ -564,7 +595,6 @@ class TelegramBot {
         signal
       );
 
-      // If cancelled and nothing downloaded at all
       if (downloadResult.successImages === 0) {
         await this.updateStatus(ctx, msgId,
           signal.aborted
@@ -574,7 +604,6 @@ class TelegramBot {
         return;
       }
 
-      // Whether cancelled or completed — zip whatever was downloaded
       const statusText = signal.aborted
         ? `Cancelled. Packaging ${downloadResult.successImages} downloaded images...`
         : 'Creating ZIP archive...';
@@ -588,11 +617,9 @@ class TelegramBot {
       const stats = fs.statSync(zipPath);
       const fileSize = FileManager.formatBytes(stats.size);
 
-      const galWord = downloadResult.totalGalleries === 1 ? 'gallery' : 'galleries';
       const prefix = signal.aborted ? '\u26A0\uFE0F Partial' : '\u2705 Done';
-
       const finalMsg = [
-        `${prefix} ${e(String(downloadResult.successImages))} images downloaded, ${e(fileSize)}`,
+        `${prefix} ${e(String(downloadResult.successImages))} images, ${e(fileSize)}`,
         '',
         '```',
         e(downloadUrl),
@@ -625,6 +652,11 @@ class TelegramBot {
   async initialize() {
     await strategyEngine.loadStrategies();
     Logger.info('Bot initialized successfully');
+    if (ALLOWED_USERS.size > 0) {
+      Logger.info(`Whitelist active: ${ALLOWED_USERS.size} allowed user(s): ${[...ALLOWED_USERS].join(', ')}`);
+    } else {
+      Logger.info('Whitelist inactive: all users allowed');
+    }
   }
 
   async startWebhook(webhookDomain, webhookPath) {
