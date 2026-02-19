@@ -1,0 +1,29 @@
+{
+  "_comment": "This file contains CSS selectors configuration for each supported site",
+  "_structure": {
+    "domain": {
+      "name": "Site name",
+      "images": {
+        "selector": "CSS selector for image links inside a gallery page",
+        "attr": "Attribute name to extract the image URL (href or src)",
+        "filterPatterns": ["Array of patterns to filter out thumbnails"]
+      }
+    }
+  },
+  "elitebabes.com": {
+    "name": "EliteBabes",
+    "images": {
+      "selector": "a[href*='cdn'][href$='.jpg']",
+      "attr": "href",
+      "filterPatterns": ["thumb", "_w400", "_w600", "masonry", "logo"]
+    }
+  },
+  "definebabe.com": {
+    "name": "DefineBabe",
+    "images": {
+      "selector": "a[itemprop='contentUrl']",
+      "attr": "href",
+      "filterPatterns": [".webp", "_.", "masonry", "thumb", "-150x"]
+    }
+  }
+}
