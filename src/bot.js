@@ -4,7 +4,7 @@
  * downloads all images in parallel, and returns a ZIP download link.
  */
 
-const { Telegraf, Markup } = require('telegraf');
+const { Telegraf } = require('telegraf');
 const path = require('path');
 const fs = require('fs');
 const Logger = require('./utils/logger');
@@ -291,7 +291,7 @@ class TelegramBot {
       const archiveName = `galleries_${ctx.from.id}`;
       zipPath = await ZipCreator.createZip(tempDir, archiveName, DOWNLOADS_DIR);
 
-      // ── Step 4: Send download link ────────────────────────────────────────
+      // ── Step 4: Send download link only (monospace = tap to copy) ─────────
       await this.updateStatus(ctx, msgId, 'Generating download link...');
 
       const zipFileName = path.basename(zipPath);
@@ -301,12 +301,10 @@ class TelegramBot {
 
       await this.retryWithBackoff(() =>
         ctx.reply(
-          'Download ready!\n\n' +
-          `Galleries: ${downloadResult.totalGalleries}\n` +
-          `Images downloaded: ${downloadResult.successImages}/${downloadResult.totalImages}\n` +
-          `File size: ${fileSize}\n` +
-          `File: ${zipFileName}\n\n` +
-          `Download link (valid 24h):\n${downloadUrl}`
+          `✅ Done! ${downloadResult.totalGalleries} ${downloadResult.totalGalleries === 1 ? 'gallery' : 'galleries'}, ` +
+          `${downloadResult.successImages} images, ${fileSize}\n\n` +
+          `\`${downloadUrl}\``,
+          { parse_mode: 'Markdown' }
         )
       );
 
