@@ -27,26 +27,11 @@ const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR || path.join(process.cwd(), 'dow
 const DOWNLOAD_BASE_URL = process.env.DOWNLOAD_BASE_URL || 'http://localhost:3000/downloads';
 
 /**
- * Escape special characters for MarkdownV2
+ * Escape ALL MarkdownV2 reserved characters.
+ * Must be applied to every dynamic value inserted into a MarkdownV2 message.
  */
 function escapeV2(text) {
-  return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
-}
-
-/**
- * Send a URL as a copyable code block (MarkdownV2)
- * disable_web_page_preview stops Telegram from uploading/previewing the file
- */
-async function sendLink(ctx, summaryText, url) {
-  const escapedSummary = escapeV2(summaryText);
-  const escapedUrl = escapeV2(url);
-  await ctx.reply(
-    `${escapedSummary}\n\n\`\`\`\n${escapedUrl}\n\`\`\``,
-    {
-      parse_mode: 'MarkdownV2',
-      disable_web_page_preview: true
-    }
-  );
+  return String(text).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
 }
 
 class TelegramBot {
@@ -202,7 +187,7 @@ class TelegramBot {
       keyboard ? ctx.reply(text, keyboard) : ctx.reply(text);
     });
 
-    // ── Name callbacks ───────────────────────────────────────────────────
+    // ── Name callbacks ─────────────────────────────────────────────────
 
     this.bot.action('rename_archive', async (ctx) => {
       const session = this.getUserSession(ctx.from.id);
@@ -246,14 +231,20 @@ class TelegramBot {
       const date = f.date.toISOString().slice(0, 16).replace('T', ' ');
       const downloadUrl = `${DOWNLOAD_BASE_URL}/${f.name}`;
 
-      // MarkdownV2: name/size/date as plain escaped text, URL in code block
-      const msg =
-        `\u{1F4C2} *File Details*\n\n` +
-        `Name: \`${escapeV2(f.name)}\`\n` +
-        `Size: ${escapeV2(size)}\n` +
-        `Date: ${escapeV2(date)}\n\n` +
-        `*Link \(tap to copy\):*\n` +
-        `\`\`\`\n${escapeV2(downloadUrl)}\n\`\`\``;
+      // Build MarkdownV2 message - escape ALL dynamic values
+      // Use code block for the URL so user can tap-to-copy
+      const msg = [
+        '\u{1F4C2} *File Details*',
+        '',
+        `Name: \`${escapeV2(f.name)}\``,
+        `Size: ${escapeV2(size)}`,
+        `Date: ${escapeV2(date)}`,
+        '',
+        'Link:',
+        `\`\`\``,
+        escapeV2(downloadUrl),
+        `\`\`\``
+      ].join('\n');
 
       const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback('\u{1F5D1} Delete This File', `cd:${idx}`)],
@@ -490,18 +481,27 @@ class TelegramBot {
       const stats = fs.statSync(zipPath);
       const fileSize = FileManager.formatBytes(stats.size);
 
-      const summary =
-        `\u2705 Done\! ${downloadResult.totalGalleries} ${downloadResult.totalGalleries === 1 ? 'gallery' : 'galleries'}, ` +
-        `${downloadResult.successImages} images, ${escapeV2(fileSize)}`;
+      // MarkdownV2 final message with copyable code block URL
+      const galleries_word = downloadResult.totalGalleries === 1 ? 'gallery' : 'galleries';
+      const msg = [
+        `\u2705 Done\! ${escapeV2(String(downloadResult.totalGalleries))} ${galleries_word}, ${escapeV2(String(downloadResult.successImages))} images, ${escapeV2(fileSize)}`,
+        '',
+        '`\`\`',
+        escapeV2(downloadUrl),
+        '`\`\`'
+      ].join('\n');
+
+      // Simpler approach: build the triple-backtick block directly
+      const finalMsg =
+        `\u2705 Done\! ${escapeV2(String(downloadResult.totalGalleries))} ${galleries_word}, ` +
+        `${escapeV2(String(downloadResult.successImages))} images, ${escapeV2(fileSize)}\n\n` +
+        `\`\`\`\n${escapeV2(downloadUrl)}\n\`\`\``;
 
       await this.retryWithBackoff(() =>
-        ctx.reply(
-          `${summary}\n\n\`\`\`\n${escapeV2(downloadUrl)}\n\`\`\``,
-          {
-            parse_mode: 'MarkdownV2',
-            disable_web_page_preview: true
-          }
-        )
+        ctx.reply(finalMsg, {
+          parse_mode: 'MarkdownV2',
+          disable_web_page_preview: true
+        })
       );
 
       await this.retryWithBackoff(() =>
