@@ -15,12 +15,10 @@ const ZipCreator = require('./downloaders/zipCreator');
 const STATE = {
   IDLE: 'idle',
   PROCESSING: 'processing',
-  WAITING_NAME: 'waiting_name'   // waiting for user to type custom archive name
+  WAITING_NAME: 'waiting_name'
 };
 
 const UPDATE_INTERVAL_MS = 5000;
-
-// Valid archive name: letters, digits, dash, dot, underscore only
 const VALID_NAME_REGEX = /^[a-zA-Z0-9\-._]+$/;
 
 const userSessions = new Map();
@@ -76,6 +74,9 @@ class TelegramBot {
     ).catch(() => {});
   }
 
+  /**
+   * Get sorted list of ZIP files
+   */
   getDownloadedFiles() {
     if (!fs.existsSync(DOWNLOADS_DIR)) return [];
     return fs.readdirSync(DOWNLOADS_DIR)
@@ -88,54 +89,50 @@ class TelegramBot {
       .sort((a, b) => b.date - a.date);
   }
 
+  /**
+   * Build file list message + keyboard using numeric indexes in callbacks
+   */
   buildFilesListMessage() {
     const files = this.getDownloadedFiles();
     if (files.length === 0) return { text: 'No downloaded files found.', keyboard: null };
 
     const totalSize = FileManager.formatBytes(files.reduce((sum, f) => sum + f.size, 0));
-    let msg = `🗂 Downloaded ZIP files (${files.length} total, ${totalSize}):\n\n`;
+    let msg = `\ud83d\uddc2 Downloaded ZIP files (${files.length} total, ${totalSize}):\n\n`;
     files.forEach((f, i) => {
       const size = FileManager.formatBytes(f.size);
       const date = f.date.toISOString().slice(0, 16).replace('T', ' ');
       msg += `${i + 1}. ${f.name}\n    ${size}  |  ${date}\n\n`;
     });
 
+    // Use numeric index in callback data (avoids filename special chars & 64-byte limit)
     const buttons = files.map((f, i) =>
-      [Markup.button.callback(`📂 ${i + 1}. ${f.name.substring(0, 38)}`, `file:${f.name}`)]
+      [Markup.button.callback(`\ud83d\udcc2 ${i + 1}. ${f.name.substring(0, 40)}`, `fi:${i}`)]
     );
-    buttons.push([Markup.button.callback('⚙️ Manage All Files', 'manage_all')]);
+    buttons.push([Markup.button.callback('\u2699\ufe0f Manage All Files', 'manage_all')]);
 
     return { text: msg, keyboard: Markup.inlineKeyboard(buttons) };
   }
 
-  /**
-   * Generate default archive name from URLs
-   * Uses slug of first gallery + timestamp
-   */
   buildDefaultName(urls) {
     const slug = JsdomScraper.extractGalleryName(urls[0]).substring(0, 30);
     const ts = Date.now();
     return `${slug}_${ts}`;
   }
 
-  /**
-   * Send the name-selection prompt
-   */
   async sendNamePrompt(ctx, session) {
     const defaultName = session.pendingJob.archiveName;
     const msg =
-      `📝 Archive name:\n\n` +
+      `\ud83d\udcdd Archive name:\n\n` +
       `Default: \`${defaultName}\`\n\n` +
-      `Tap “Start Download” to use it, or “Rename” to choose a custom name.\n\n` +
+      `Tap \u201cStart Download\u201d to use it, or \u201cRename\u201d to choose a custom name.\n\n` +
       `Allowed characters: letters, numbers, \`-\` \`_\` \`.\``;
 
     const keyboard = Markup.inlineKeyboard([
-      [Markup.button.callback('✅ Start Download', 'start_download')],
-      [Markup.button.callback('✏️ Rename', 'rename_archive')]
+      [Markup.button.callback('\u2705 Start Download', 'start_download')],
+      [Markup.button.callback('\u270f\ufe0f Rename', 'rename_archive')]
     ]);
 
-    const sent = await ctx.reply(msg, { parse_mode: 'Markdown', ...keyboard });
-    session.pendingJob.promptMsgId = sent.message_id;
+    await ctx.reply(msg, { parse_mode: 'Markdown', ...keyboard });
   }
 
   setupHandlers() {
@@ -165,7 +162,7 @@ class TelegramBot {
         'How to use:\n\n' +
         '1. Send one or more gallery URLs, one per line.\n\n' +
         '2. Choose a name for the ZIP archive (or use the default).\n\n' +
-        '3. Tap “Start Download” and wait.\n\n' +
+        '3. Tap \u201cStart Download\u201d and wait.\n\n' +
         '4. Receive your download link.\n\n' +
         'Commands:\n' +
         '  /files  - View and manage downloaded ZIP files\n' +
@@ -193,88 +190,109 @@ class TelegramBot {
       keyboard ? ctx.reply(text, keyboard) : ctx.reply(text);
     });
 
-    // ── Name selection callbacks ─────────────────────────────────────────────
+    // ── Name selection callbacks ──────────────────────────────────────────
 
-    // Callback: user wants to rename
     this.bot.action('rename_archive', async (ctx) => {
       const session = this.getUserSession(ctx.from.id);
       await ctx.answerCbQuery();
       session.state = STATE.WAITING_NAME;
       await ctx.editMessageText(
-        '✏️ Type your custom archive name:\n\n' +
+        '\u270f\ufe0f Type your custom archive name:\n\n' +
         'Allowed: letters, numbers, `-` `_` `.`\n' +
         'Example: `my-gallery_2026`',
         { parse_mode: 'Markdown' }
       );
     });
 
-    // Callback: start download with current name
     this.bot.action('start_download', async (ctx) => {
       const session = this.getUserSession(ctx.from.id);
       await ctx.answerCbQuery();
-
       if (!session.pendingJob) {
         await ctx.editMessageText('Session expired. Please send the URLs again.');
         return;
       }
-
       await ctx.deleteMessage().catch(() => {});
-      await this.processGalleries(ctx, session.pendingJob.urls, session.pendingJob.archiveName);
+      const { urls, archiveName } = session.pendingJob;
       session.pendingJob = null;
+      await this.processGalleries(ctx, urls, archiveName);
     });
 
-    // ── File manager callbacks ──────────────────────────────────────────────
+    // ── File manager: open file by index ─────────────────────────────────
 
-    this.bot.action(/^file:(.+)$/, async (ctx) => {
-      const fileName = ctx.match[1];
-      const filePath = path.join(DOWNLOADS_DIR, fileName);
-      if (!fs.existsSync(filePath)) {
-        await ctx.answerCbQuery('File not found.');
+    this.bot.action(/^fi:(\d+)$/, async (ctx) => {
+      const idx = parseInt(ctx.match[1]);
+      const files = this.getDownloadedFiles();
+
+      if (idx < 0 || idx >= files.length) {
+        await ctx.answerCbQuery('File not found. The list may have changed.');
+        // Refresh list
+        const { text, keyboard } = this.buildFilesListMessage();
+        await ctx.editMessageText(text, keyboard || undefined);
         return;
       }
-      const stats = fs.statSync(filePath);
-      const size = FileManager.formatBytes(stats.size);
-      const date = stats.mtime.toISOString().slice(0, 16).replace('T', ' ');
-      const downloadUrl = `${DOWNLOAD_BASE_URL}/${fileName}`;
+
+      const f = files[idx];
+      const size = FileManager.formatBytes(f.size);
+      const date = f.date.toISOString().slice(0, 16).replace('T', ' ');
+      const downloadUrl = `${DOWNLOAD_BASE_URL}/${f.name}`;
 
       const msg =
-        `📂 File Details:\n\n` +
-        `Name: ${fileName}\n` +
+        `\ud83d\udcc2 File Details:\n\n` +
+        `Name: ${f.name}\n` +
         `Size: ${size}\n` +
         `Date: ${date}\n\n` +
         `Link:\n\`${downloadUrl}\``;
 
       const keyboard = Markup.inlineKeyboard([
-        [Markup.button.callback('🗑 Delete This File', `confirm_del:${fileName}`)],
-        [Markup.button.callback('⬅️ Back to List', 'back_to_list')]
+        [Markup.button.callback('\ud83d\uddd1 Delete This File', `cd:${idx}`)],
+        [Markup.button.callback('\u2b05\ufe0f Back to List', 'back_to_list')]
       ]);
 
       await ctx.answerCbQuery();
       await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...keyboard });
     });
 
-    this.bot.action(/^confirm_del:(.+)$/, async (ctx) => {
-      const fileName = ctx.match[1];
+    // Confirm delete single (cd = confirm delete)
+    this.bot.action(/^cd:(\d+)$/, async (ctx) => {
+      const idx = parseInt(ctx.match[1]);
+      const files = this.getDownloadedFiles();
+
+      if (idx < 0 || idx >= files.length) {
+        await ctx.answerCbQuery('File not found.');
+        return;
+      }
+
+      const fileName = files[idx].name;
       await ctx.answerCbQuery();
       await ctx.editMessageText(
-        `⚠️ Are you sure you want to delete:\n\n${fileName}?`,
+        `\u26a0\ufe0f Are you sure you want to delete:\n\n${fileName}?`,
         Markup.inlineKeyboard([
-          [Markup.button.callback('✅ Yes, Delete', `do_del:${fileName}`)],
-          [Markup.button.callback('❌ Cancel', `file:${fileName}`)]
+          [Markup.button.callback('\u2705 Yes, Delete', `dd:${idx}`)],
+          [Markup.button.callback('\u274c Cancel', `fi:${idx}`)]
         ])
       );
     });
 
-    this.bot.action(/^do_del:(.+)$/, async (ctx) => {
-      const fileName = ctx.match[1];
+    // Execute delete single (dd = do delete)
+    this.bot.action(/^dd:(\d+)$/, async (ctx) => {
+      const idx = parseInt(ctx.match[1]);
+      const files = this.getDownloadedFiles();
+
+      if (idx < 0 || idx >= files.length) {
+        await ctx.answerCbQuery('File not found.');
+        return;
+      }
+
+      const fileName = files[idx].name;
       const filePath = path.join(DOWNLOADS_DIR, fileName);
+
       try {
         await FileManager.deleteFile(filePath);
         Logger.info(`File deleted: ${fileName}`);
         await ctx.answerCbQuery('File deleted.');
-        const files = this.getDownloadedFiles();
-        if (files.length === 0) {
-          await ctx.editMessageText('✅ File deleted. No more files.');
+        const remaining = this.getDownloadedFiles();
+        if (remaining.length === 0) {
+          await ctx.editMessageText('\u2705 File deleted. No more files.');
         } else {
           const { text, keyboard } = this.buildFilesListMessage();
           await ctx.editMessageText(text, keyboard);
@@ -285,37 +303,41 @@ class TelegramBot {
       }
     });
 
+    // Back to list
     this.bot.action('back_to_list', async (ctx) => {
       await ctx.answerCbQuery();
       const { text, keyboard } = this.buildFilesListMessage();
       keyboard ? await ctx.editMessageText(text, keyboard) : await ctx.editMessageText(text);
     });
 
+    // Manage All menu
     this.bot.action('manage_all', async (ctx) => {
       const files = this.getDownloadedFiles();
       const totalSize = FileManager.formatBytes(files.reduce((sum, f) => sum + f.size, 0));
       await ctx.answerCbQuery();
       await ctx.editMessageText(
-        `⚙️ Manage All Files\n\nTotal: ${files.length} file(s), ${totalSize}\n\nThis will permanently delete all downloaded ZIP files.`,
+        `\u2699\ufe0f Manage All Files\n\nTotal: ${files.length} file(s), ${totalSize}\n\nThis will permanently delete all downloaded ZIP files.`,
         Markup.inlineKeyboard([
-          [Markup.button.callback('🗑 Delete ALL Files', 'confirm_del_all')],
-          [Markup.button.callback('⬅️ Back to List', 'back_to_list')]
+          [Markup.button.callback('\ud83d\uddd1 Delete ALL Files', 'confirm_del_all')],
+          [Markup.button.callback('\u2b05\ufe0f Back to List', 'back_to_list')]
         ])
       );
     });
 
+    // Confirm delete all
     this.bot.action('confirm_del_all', async (ctx) => {
       const files = this.getDownloadedFiles();
       await ctx.answerCbQuery();
       await ctx.editMessageText(
-        `⚠️ Are you sure you want to delete ALL ${files.length} file(s)?\n\nThis cannot be undone.`,
+        `\u26a0\ufe0f Are you sure you want to delete ALL ${files.length} file(s)?\n\nThis cannot be undone.`,
         Markup.inlineKeyboard([
-          [Markup.button.callback('✅ Yes, Delete All', 'do_del_all')],
-          [Markup.button.callback('❌ Cancel', 'manage_all')]
+          [Markup.button.callback('\u2705 Yes, Delete All', 'do_del_all')],
+          [Markup.button.callback('\u274c Cancel', 'manage_all')]
         ])
       );
     });
 
+    // Execute delete all
     this.bot.action('do_del_all', async (ctx) => {
       const files = this.getDownloadedFiles();
       let deleted = 0;
@@ -329,56 +351,54 @@ class TelegramBot {
       }
       Logger.info(`Bulk delete: ${deleted}/${files.length} files removed`);
       await ctx.answerCbQuery(`Deleted ${deleted} file(s).`);
-      await ctx.editMessageText(`✅ Done. ${deleted} file(s) deleted.`);
+      await ctx.editMessageText(`\u2705 Done. ${deleted} file(s) deleted.`);
     });
 
-    // ── Text message handler ───────────────────────────────────────────────
+    // ── Text message handler ──────────────────────────────────────────────
 
     this.bot.on('text', async (ctx) => {
       const session = this.getUserSession(ctx.from.id);
 
-      // ─ User is typing a custom archive name
+      // Waiting for custom archive name
       if (session.state === STATE.WAITING_NAME) {
         const input = ctx.message.text.trim();
 
         if (!VALID_NAME_REGEX.test(input)) {
           ctx.reply(
-            '❌ Invalid name. Only letters, numbers, `-` `_` `.` are allowed.\n\n' +
-            'Please type a valid name:',
+            '\u274c Invalid name. Only letters, numbers, `-` `_` `.` are allowed.\n\nPlease type a valid name:',
             { parse_mode: 'Markdown' }
           );
           return;
         }
 
         if (input.length < 2 || input.length > 80) {
-          ctx.reply('❌ Name must be between 2 and 80 characters. Try again:');
+          ctx.reply('\u274c Name must be between 2 and 80 characters. Try again:');
           return;
         }
 
-        // Name accepted
         session.pendingJob.archiveName = input;
         session.state = STATE.IDLE;
 
         await ctx.reply(
-          `✅ Name set to: \`${input}\`\n\nReady to download.`,
+          `\u2705 Name set to: \`${input}\`\n\nReady to download.`,
           {
             parse_mode: 'Markdown',
             ...Markup.inlineKeyboard([
-              [Markup.button.callback('✅ Start Download', 'start_download')],
-              [Markup.button.callback('✏️ Rename Again', 'rename_archive')]
+              [Markup.button.callback('\u2705 Start Download', 'start_download')],
+              [Markup.button.callback('\u270f\ufe0f Rename Again', 'rename_archive')]
             ])
           }
         );
         return;
       }
 
-      // ─ Already processing
+      // Already processing
       if (session.state === STATE.PROCESSING) {
         ctx.reply('Already processing a job. Please wait until it finishes.');
         return;
       }
 
-      // ─ Parse gallery URLs
+      // Parse gallery URLs
       const lines = ctx.message.text
         .split('\n')
         .map(l => l.trim())
@@ -399,9 +419,9 @@ class TelegramBot {
         return;
       }
 
-      // ─ Store pending job and ask for archive name
+      // Store pending job and ask for archive name
       const defaultName = this.buildDefaultName(lines);
-      session.pendingJob = { urls: lines, archiveName: defaultName, promptMsgId: null };
+      session.pendingJob = { urls: lines, archiveName: defaultName };
       session.state = STATE.IDLE;
 
       await this.sendNamePrompt(ctx, session);
@@ -416,9 +436,6 @@ class TelegramBot {
     });
   }
 
-  /**
-   * Main download pipeline
-   */
   async processGalleries(ctx, urls, archiveName) {
     const session = this.getUserSession(ctx.from.id);
     session.state = STATE.PROCESSING;
@@ -487,7 +504,7 @@ class TelegramBot {
 
       await this.retryWithBackoff(() =>
         ctx.reply(
-          `✅ Done! ${downloadResult.totalGalleries} ${downloadResult.totalGalleries === 1 ? 'gallery' : 'galleries'}, ` +
+          `\u2705 Done! ${downloadResult.totalGalleries} ${downloadResult.totalGalleries === 1 ? 'gallery' : 'galleries'}, ` +
           `${downloadResult.successImages} images, ${fileSize}\n\n` +
           `\`${downloadUrl}\``,
           { parse_mode: 'Markdown' }
