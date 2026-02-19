@@ -26,10 +26,7 @@ const userSessions = new Map();
 const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR || path.join(process.cwd(), 'downloads');
 const DOWNLOAD_BASE_URL = process.env.DOWNLOAD_BASE_URL || 'http://localhost:3000/downloads';
 
-/**
- * Escape ALL MarkdownV2 reserved characters.
- * Apply to EVERY dynamic string — never manually add backslashes in template literals.
- */
+/** Escape all MarkdownV2 reserved characters */
 function e(text) {
   return String(text).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
 }
@@ -101,9 +98,10 @@ class TelegramBot {
     }
   }
 
-  async updateStatus(ctx, messageId, text) {
+  async updateStatus(ctx, messageId, text, keyboard = null) {
+    const opts = keyboard ? keyboard : {};
     await this.retryWithBackoff(() =>
-      ctx.telegram.editMessageText(ctx.chat.id, messageId, null, text)
+      ctx.telegram.editMessageText(ctx.chat.id, messageId, null, text, opts)
     ).catch(() => {});
   }
 
@@ -235,6 +233,18 @@ class TelegramBot {
       await this.processGalleries(ctx, urls, archiveName);
     });
 
+    // ── Cancel download button ────────────────────────────────────────────
+
+    this.bot.action('cancel_download', async (ctx) => {
+      const session = this.getUserSession(ctx.from.id);
+      await ctx.answerCbQuery('Cancelling...');
+
+      if (session.abortController) {
+        session.abortController.abort();
+        Logger.info(`User ${ctx.from.id} cancelled download`);
+      }
+    });
+
     // ── File manager ──────────────────────────────────────────────────────
 
     this.bot.action(/^fi:(\d+)$/, async (ctx) => {
@@ -254,7 +264,6 @@ class TelegramBot {
       const downloadUrl = `${DOWNLOAD_BASE_URL}/${f.name}`;
       const meta = readMeta(f.name);
 
-      // All dynamic values passed through e() — no manual backslashes
       const msg = [
         '\u{1F4C2} *File Details*',
         '',
@@ -477,7 +486,7 @@ class TelegramBot {
       Logger.error('Unhandled bot error', { error: err.message, user: ctx.from?.id });
       ctx.reply('An unexpected error occurred. Please try again or send /start to reset.').catch(() => {});
       const session = this.getUserSession(ctx.from?.id);
-      if (session) { session.state = STATE.IDLE; session.pendingJob = null; }
+      if (session) { session.state = STATE.IDLE; session.pendingJob = null; session.abortController = null; }
     });
   }
 
@@ -485,18 +494,30 @@ class TelegramBot {
     const session = this.getUserSession(ctx.from.id);
     session.state = STATE.PROCESSING;
 
-    const statusMsg = await ctx.reply('Starting... please wait.');
+    // Create AbortController for this job
+    const abortController = new AbortController();
+    session.abortController = abortController;
+    const { signal } = abortController;
+
+    const cancelKeyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('\u274C Cancel Download', 'cancel_download')]
+    ]);
+
+    const statusMsg = await ctx.reply('Starting... please wait.', cancelKeyboard);
     const msgId = statusMsg.message_id;
     let tempDir = null;
     let zipPath = null;
 
     try {
       await this.updateStatus(ctx, msgId,
-        `Extracting images from ${urls.length} ${urls.length === 1 ? 'gallery' : 'galleries'}...`
+        `Extracting images from ${urls.length} ${urls.length === 1 ? 'gallery' : 'galleries'}...`,
+        cancelKeyboard
       );
 
       const galleries = [];
       for (let i = 0; i < urls.length; i++) {
+        if (signal.aborted) break;
+
         const url = urls[i];
         const strategy = strategyEngine.getStrategy(url);
         const galleryName = JsdomScraper.extractGalleryName(url);
@@ -508,21 +529,26 @@ class TelegramBot {
           Logger.warn(`Failed to extract gallery: ${url}`, { error: err.message });
           galleries.push({ name: galleryName, urls: [] });
         }
-        await this.updateStatus(ctx, msgId, `Extracting images... (${i + 1}/${urls.length} galleries done)`);
+        await this.updateStatus(ctx, msgId,
+          `Extracting images... (${i + 1}/${urls.length} galleries done)`,
+          cancelKeyboard
+        );
       }
 
       const totalImages = galleries.reduce((sum, g) => sum + g.urls.length, 0);
       if (totalImages === 0) throw new Error('No images found in any of the provided galleries.');
 
       await this.updateStatus(ctx, msgId,
-        `Found ${totalImages} images across ${galleries.length} ${galleries.length === 1 ? 'gallery' : 'galleries'}.\nDownloading...`
+        `Found ${totalImages} images across ${galleries.length} ${galleries.length === 1 ? 'gallery' : 'galleries'}.\nDownloading...`,
+        cancelKeyboard
       );
 
       tempDir = await FileManager.createTempDir('galleries');
       let lastUpdateTime = 0;
 
       const downloadResult = await ImageDownloader.downloadMultipleGalleries(
-        galleries, tempDir,
+        galleries,
+        tempDir,
         (progress) => {
           const now = Date.now();
           if (now - lastUpdateTime >= UPDATE_INTERVAL_MS) {
@@ -530,17 +556,31 @@ class TelegramBot {
             this.updateStatus(ctx, msgId,
               `Downloading gallery ${progress.completedGalleries + 1}/${progress.totalGalleries}\n` +
               `Current: ${progress.galleryName}\n` +
-              `Progress: ${progress.galleryProgress.current}/${progress.galleryProgress.total} images`
+              `Progress: ${progress.galleryProgress.current}/${progress.galleryProgress.total} images`,
+              cancelKeyboard
             ).catch(() => {});
           }
-        }
+        },
+        signal
       );
 
-      if (downloadResult.successImages === 0) throw new Error('Failed to download any images.');
+      // If cancelled and nothing downloaded at all
+      if (downloadResult.successImages === 0) {
+        await this.updateStatus(ctx, msgId,
+          signal.aborted
+            ? 'Cancelled. No images were downloaded yet.'
+            : 'Failed to download any images. Please check your URLs and try again.'
+        );
+        return;
+      }
 
-      await this.updateStatus(ctx, msgId, 'Creating ZIP archive...');
+      // Whether cancelled or completed — zip whatever was downloaded
+      const statusText = signal.aborted
+        ? `Cancelled. Packaging ${downloadResult.successImages} downloaded images...`
+        : 'Creating ZIP archive...';
+      await this.updateStatus(ctx, msgId, statusText);
+
       zipPath = await ZipCreator.createZip(tempDir, archiveName, DOWNLOADS_DIR);
-
       const zipFileName = path.basename(zipPath);
       saveMeta(zipFileName, urls);
 
@@ -549,10 +589,10 @@ class TelegramBot {
       const fileSize = FileManager.formatBytes(stats.size);
 
       const galWord = downloadResult.totalGalleries === 1 ? 'gallery' : 'galleries';
+      const prefix = signal.aborted ? '\u26A0\uFE0F Partial' : '\u2705 Done';
 
-      // Build MarkdownV2 message — all dynamic values through e(), no manual escaping
       const finalMsg = [
-        `\u2705 Done ${e(String(downloadResult.totalGalleries))} ${e(galWord)}, ${e(String(downloadResult.successImages))} images, ${e(fileSize)}`,
+        `${prefix} ${e(String(downloadResult.successImages))} images downloaded, ${e(fileSize)}`,
         '',
         '```',
         e(downloadUrl),
@@ -570,7 +610,7 @@ class TelegramBot {
         ctx.telegram.deleteMessage(ctx.chat.id, msgId)
       ).catch(() => {});
 
-      Logger.info(`Job complete for user ${ctx.from.id}: ${zipFileName}`);
+      Logger.info(`Job ${signal.aborted ? 'cancelled (partial)' : 'complete'} for user ${ctx.from.id}: ${zipFileName}`);
 
     } catch (error) {
       Logger.error('Gallery processing failed', { error: error.message, user: ctx.from.id });
@@ -578,6 +618,7 @@ class TelegramBot {
     } finally {
       if (tempDir) await FileManager.deleteDir(tempDir).catch(() => {});
       session.state = STATE.IDLE;
+      session.abortController = null;
     }
   }
 
