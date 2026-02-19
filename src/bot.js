@@ -26,18 +26,19 @@ const userSessions = new Map();
 const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR || path.join(process.cwd(), 'downloads');
 const DOWNLOAD_BASE_URL = process.env.DOWNLOAD_BASE_URL || 'http://localhost:3000/downloads';
 
-/** Escape all MarkdownV2 reserved characters */
-function escapeV2(text) {
+/**
+ * Escape ALL MarkdownV2 reserved characters.
+ * Apply to EVERY dynamic string — never manually add backslashes in template literals.
+ */
+function e(text) {
   return String(text).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
 }
 
-/** Read saved URLs for a ZIP file (stored as <name>.json next to the ZIP) */
+/** Read saved URLs for a ZIP file */
 function readMeta(zipName) {
   const metaPath = path.join(DOWNLOADS_DIR, zipName.replace(/\.zip$/, '.json'));
   try {
-    if (fs.existsSync(metaPath)) {
-      return JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-    }
+    if (fs.existsSync(metaPath)) return JSON.parse(fs.readFileSync(metaPath, 'utf8'));
   } catch (_) {}
   return null;
 }
@@ -50,6 +51,12 @@ function saveMeta(zipName, urls) {
   } catch (err) {
     Logger.warn(`Failed to save metadata for ${zipName}`, { error: err.message });
   }
+}
+
+/** Delete metadata file alongside a ZIP */
+function deleteMeta(zipName) {
+  const metaPath = path.join(DOWNLOADS_DIR, zipName.replace(/\.zip$/, '.json'));
+  if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
 }
 
 class TelegramBot {
@@ -134,8 +141,7 @@ class TelegramBot {
 
   buildDefaultName(urls) {
     const slug = JsdomScraper.extractGalleryName(urls[0]).substring(0, 30);
-    const ts = Date.now();
-    return `${slug}_${ts}`;
+    return `${slug}_${Date.now()}`;
   }
 
   async sendNamePrompt(ctx, session) {
@@ -146,12 +152,10 @@ class TelegramBot {
       `Tap "Start Download" to use it, or "Rename" to choose a custom name.\n\n` +
       `Allowed characters: letters, numbers, - _ .`;
 
-    const keyboard = Markup.inlineKeyboard([
+    await ctx.reply(msg, Markup.inlineKeyboard([
       [Markup.button.callback('\u2705 Start Download', 'start_download')],
       [Markup.button.callback('\u270F\uFE0F Rename', 'rename_archive')]
-    ]);
-
-    await ctx.reply(msg, keyboard);
+    ]));
   }
 
   setupHandlers() {
@@ -205,7 +209,7 @@ class TelegramBot {
       keyboard ? ctx.reply(text, keyboard) : ctx.reply(text);
     });
 
-    // ── Name callbacks ───────────────────────────────────────────────
+    // ── Name callbacks ────────────────────────────────────────────────────
 
     this.bot.action('rename_archive', async (ctx) => {
       const session = this.getUserSession(ctx.from.id);
@@ -231,7 +235,7 @@ class TelegramBot {
       await this.processGalleries(ctx, urls, archiveName);
     });
 
-    // ── File manager: open file by index ───────────────────────────────────
+    // ── File manager ──────────────────────────────────────────────────────
 
     this.bot.action(/^fi:(\d+)$/, async (ctx) => {
       const idx = parseInt(ctx.match[1]);
@@ -250,20 +254,20 @@ class TelegramBot {
       const downloadUrl = `${DOWNLOAD_BASE_URL}/${f.name}`;
       const meta = readMeta(f.name);
 
+      // All dynamic values passed through e() — no manual backslashes
       const msg = [
         '\u{1F4C2} *File Details*',
         '',
-        `Name: \`${escapeV2(f.name)}\``,
-        `Size: ${escapeV2(size)}`,
-        `Date: ${escapeV2(date)}`,
+        `Name: \`${e(f.name)}\``,
+        `Size: ${e(size)}`,
+        `Date: ${e(date)}`,
         '',
         'Link:',
-        '\`\`\`',
-        escapeV2(downloadUrl),
-        '\`\`\`'
+        '```',
+        e(downloadUrl),
+        '```'
       ].join('\n');
 
-      // Show Sources button only if metadata exists
       const rows = [
         [Markup.button.callback('\u{1F5D1} Delete This File', `cd:${idx}`)],
         [Markup.button.callback('\u2B05\uFE0F Back to List', 'back_to_list')]
@@ -280,7 +284,7 @@ class TelegramBot {
       });
     });
 
-    // Show gallery source URLs
+    // Gallery source URLs
     this.bot.action(/^src:(\d+)$/, async (ctx) => {
       const idx = parseInt(ctx.match[1]);
       const files = this.getDownloadedFiles();
@@ -298,11 +302,14 @@ class TelegramBot {
         return;
       }
 
-      const urlList = meta.urls.join('\n');
-      const msg =
-        `\u{1F517} *Gallery Sources*\n` +
-        `${escapeV2(f.name)}\n\n` +
-        `\`\`\`\n${escapeV2(urlList)}\n\`\`\``;
+      const msg = [
+        '\u{1F517} *Gallery Sources*',
+        `${e(f.name)}`,
+        '',
+        '```',
+        meta.urls.map(u => e(u)).join('\n'),
+        '```'
+      ].join('\n');
 
       await ctx.answerCbQuery();
       await ctx.editMessageText(msg, {
@@ -342,12 +349,9 @@ class TelegramBot {
         return;
       }
       const fileName = files[idx].name;
-      const filePath = path.join(DOWNLOADS_DIR, fileName);
-      // Also delete metadata file if exists
-      const metaPath = path.join(DOWNLOADS_DIR, fileName.replace(/\.zip$/, '.json'));
       try {
-        await FileManager.deleteFile(filePath);
-        if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
+        await FileManager.deleteFile(path.join(DOWNLOADS_DIR, fileName));
+        deleteMeta(fileName);
         Logger.info(`File deleted: ${fileName}`);
         await ctx.answerCbQuery('File deleted.');
         const remaining = this.getDownloadedFiles();
@@ -400,9 +404,7 @@ class TelegramBot {
       for (const f of files) {
         try {
           await FileManager.deleteFile(path.join(DOWNLOADS_DIR, f.name));
-          // Also delete metadata
-          const metaPath = path.join(DOWNLOADS_DIR, f.name.replace(/\.zip$/, '.json'));
-          if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
+          deleteMeta(f.name);
           deleted++;
         } catch (error) {
           Logger.error(`Failed to delete: ${f.name}`, { error: error.message });
@@ -413,7 +415,7 @@ class TelegramBot {
       await ctx.editMessageText(`\u2705 Done. ${deleted} file(s) deleted.`);
     });
 
-    // ── Text handler ─────────────────────────────────────────────────────────
+    // ── Text handler ──────────────────────────────────────────────────────
 
     this.bot.on('text', async (ctx) => {
       const session = this.getUserSession(ctx.from.id);
@@ -540,19 +542,22 @@ class TelegramBot {
       zipPath = await ZipCreator.createZip(tempDir, archiveName, DOWNLOADS_DIR);
 
       const zipFileName = path.basename(zipPath);
-
-      // Save source URLs as metadata alongside the ZIP
       saveMeta(zipFileName, urls);
 
       const downloadUrl = `${DOWNLOAD_BASE_URL}/${zipFileName}`;
       const stats = fs.statSync(zipPath);
       const fileSize = FileManager.formatBytes(stats.size);
 
-      const galleries_word = downloadResult.totalGalleries === 1 ? 'gallery' : 'galleries';
-      const finalMsg =
-        `\u2705 Done\! ${escapeV2(String(downloadResult.totalGalleries))} ${galleries_word}, ` +
-        `${escapeV2(String(downloadResult.successImages))} images, ${escapeV2(fileSize)}\n\n` +
-        `\`\`\`\n${escapeV2(downloadUrl)}\n\`\`\``;
+      const galWord = downloadResult.totalGalleries === 1 ? 'gallery' : 'galleries';
+
+      // Build MarkdownV2 message — all dynamic values through e(), no manual escaping
+      const finalMsg = [
+        `\u2705 Done ${e(String(downloadResult.totalGalleries))} ${e(galWord)}, ${e(String(downloadResult.successImages))} images, ${e(fileSize)}`,
+        '',
+        '```',
+        e(downloadUrl),
+        '```'
+      ].join('\n');
 
       await this.retryWithBackoff(() =>
         ctx.reply(finalMsg, {
