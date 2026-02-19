@@ -137,12 +137,7 @@ class TelegramBot {
     if (files.length === 0) return { text: 'No downloaded files found.', keyboard: null };
 
     const totalSize = FileManager.formatBytes(files.reduce((sum, f) => sum + f.size, 0));
-    let msg = `\u{1F5C2} Downloaded ZIP files (${files.length} total, ${totalSize}):\n\n`;
-    files.forEach((f, i) => {
-      const size = FileManager.formatBytes(f.size);
-      const date = f.date.toISOString().slice(0, 16).replace('T', ' ');
-      msg += `${i + 1}. ${f.name}\n    ${size}  |  ${date}\n\n`;
-    });
+    const msg = `\u{1F5C2} Downloaded ZIP files: ${files.length} total (${totalSize})`;
 
     const buttons = files.map((f, i) =>
       [Markup.button.callback(`\u{1F4C2} ${i + 1}. ${f.name.substring(0, 40)}`, `fi:${i}`)]
