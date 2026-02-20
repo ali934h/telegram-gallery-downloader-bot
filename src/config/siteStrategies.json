@@ -25,5 +25,13 @@
       "attr": "href",
       "filterPatterns": [".webp", "_.", "masonry", "thumb", "-150x"]
     }
+  },
+  "pornpics.com": {
+    "name": "Pornpics",
+    "images": {
+      "selector": "a[itemprop='contentUrl']",
+      "attr": "href",
+      "filterPatterns": [".webp", "_.", "masonry", "thumb", "-150x"]
+    }
   }
 }
