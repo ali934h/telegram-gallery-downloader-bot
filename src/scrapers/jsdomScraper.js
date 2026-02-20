@@ -28,36 +28,65 @@ class JsdomScraper {
   }
 
   /**
+   * Sleep helper for retry delays
+   */
+  static sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
    * Fetch HTML content from URL with optional custom headers from strategy
+   * Includes retry logic for ECONNRESET and similar errors
    * @param {string} url - URL to fetch
    * @param {Object} customHeaders - Optional custom headers from strategy
+   * @param {number} retries - Number of retry attempts (default: 3)
    */
-  static async fetchHTML(url, customHeaders = {}) {
-    try {
-      Logger.debug(`Fetching HTML from: ${url}`);
-      
-      const headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        // Merge custom headers (overrides defaults)
-        ...customHeaders
-      };
+  static async fetchHTML(url, customHeaders = {}, retries = 3) {
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.5',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Connection': 'keep-alive',
+      'Upgrade-Insecure-Requests': '1',
+      'Cache-Control': 'no-cache',
+      'Pragma': 'no-cache',
+      // Merge custom headers (overrides defaults)
+      ...customHeaders
+    };
 
-      const response = await axios.get(url, {
-        headers,
-        timeout: 30000,
-        maxRedirects: 5
-      });
-      
-      Logger.debug(`HTML fetched successfully (${response.data.length} bytes)`);
-      return response.data;
-    } catch (error) {
-      Logger.error(`Failed to fetch HTML from: ${url}`, { error: error.message });
-      throw new Error(`HTTP request failed: ${error.message}`);
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        Logger.debug(`Fetching HTML from: ${url} (attempt ${attempt}/${retries})`);
+        
+        const response = await axios.get(url, {
+          headers,
+          timeout: 30000,
+          maxRedirects: 5,
+          validateStatus: (status) => status >= 200 && status < 300
+        });
+        
+        Logger.debug(`HTML fetched successfully (${response.data.length} bytes)`);
+        return response.data;
+        
+      } catch (error) {
+        const isRetryable = 
+          error.code === 'ECONNRESET' ||
+          error.code === 'ETIMEDOUT' ||
+          error.code === 'ENOTFOUND' ||
+          error.message.includes('socket hang up') ||
+          (error.response && error.response.status >= 500);
+
+        if (isRetryable && attempt < retries) {
+          const delay = 2000 * attempt; // 2s, 4s, 6s
+          Logger.warn(`Request failed (${error.message}), retrying in ${delay}ms... (${attempt}/${retries})`);
+          await this.sleep(delay);
+          continue;
+        }
+
+        Logger.error(`Failed to fetch HTML from: ${url}`, { error: error.message });
+        throw new Error(`HTTP request failed: ${error.message}`);
+      }
     }
   }
 
