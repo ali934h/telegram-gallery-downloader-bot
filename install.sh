@@ -79,6 +79,51 @@ DOWNLOADS_DIR=${DOWNLOADS_DIR:-/root/gallery-downloads}
 
 DOWNLOAD_BASE_URL="${WEBHOOK_DOMAIN}/downloads"
 
+# ── Proxy configuration (optional) ────────────────────────────────────────────────────────
+echo ""
+echo -e "${YELLOW}═══════════════════════════════════════════════${NC}"
+echo -e "${YELLOW}  Proxy Configuration (Optional)${NC}"
+echo -e "${YELLOW}═══════════════════════════════════════════════${NC}"
+echo ""
+echo -e "Some sites (like pornpics.com) block datacenter IPs."
+echo -e "You can install Xray with VLESS proxy to bypass this."
+echo ""
+ask "Do you want to install and configure Xray proxy? [y/N]:"
+read -r INSTALL_PROXY
+
+PROXY_URL=""
+if [[ "$INSTALL_PROXY" =~ ^[Yy]$ ]]; then
+  echo ""
+  echo -e "${BLUE}Enter your VLESS configuration details:${NC}"
+  echo ""
+  
+  ask "Server address (e.g. chatgpt.com):"
+  read -r VLESS_ADDRESS
+  [[ -z "$VLESS_ADDRESS" ]] && err "Server address cannot be empty."
+  
+  ask "Server port (default: 443):"
+  read -r VLESS_PORT
+  VLESS_PORT=${VLESS_PORT:-443}
+  
+  ask "UUID (e.g. 6a4901c2-aae4-4466-bc72-e65a3d69c21f):"
+  read -r VLESS_UUID
+  [[ -z "$VLESS_UUID" ]] && err "UUID cannot be empty."
+  
+  ask "SNI / Server Name (e.g. example.workers.dev):"
+  read -r VLESS_SNI
+  [[ -z "$VLESS_SNI" ]] && err "SNI cannot be empty."
+  
+  ask "WebSocket path (e.g. /path?ed=2560):"
+  read -r VLESS_PATH
+  [[ -z "$VLESS_PATH" ]] && err "WebSocket path cannot be empty."
+  
+  ask "WebSocket Host header (e.g. example.workers.dev):"
+  read -r VLESS_HOST
+  [[ -z "$VLESS_HOST" ]] && err "Host header cannot be empty."
+  
+  PROXY_URL="socks5://127.0.0.1:1080"
+fi
+
 echo ""
 log "Configuration summary:"
 echo    "  Domain      : $WEBHOOK_DOMAIN"
@@ -88,6 +133,13 @@ echo    "  Downloads   : $DOWNLOADS_DIR"
 echo    "  Download URL: $DOWNLOAD_BASE_URL"
 echo    "  Concurrency : $DOWNLOAD_CONCURRENCY"
 echo    "  Allowed IDs : ${ALLOWED_USERS:-<everyone>}"
+if [[ "$INSTALL_PROXY" =~ ^[Yy]$ ]]; then
+  echo "  Proxy       : Enabled (Xray VLESS)"
+  echo "    └─ Server : $VLESS_ADDRESS:$VLESS_PORT"
+  echo "    └─ SNI    : $VLESS_SNI"
+else
+  echo "  Proxy       : Disabled"
+fi
 echo ""
 ask "Proceed with installation? [Y/n]:"
 read -r CONFIRM
@@ -99,6 +151,95 @@ apt-get update -qq
 
 log "Installing dependencies (curl, git, unzip)..."
 apt-get install -y -qq curl git unzip
+
+# ── Xray installation (if enabled) ────────────────────────────────────────────────────────
+if [[ "$INSTALL_PROXY" =~ ^[Yy]$ ]]; then
+  echo ""
+  log "Installing Xray..."
+  
+  if command -v xray &>/dev/null; then
+    warn "Xray already installed: $(xray version | head -1)"
+  else
+    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install &>/dev/null
+    log "Xray installed successfully."
+  fi
+  
+  log "Creating Xray configuration..."
+  cat > /usr/local/etc/xray/config.json << EOF
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "port": 1080,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "udp": true
+      }
+    },
+    {
+      "port": 10809,
+      "listen": "127.0.0.1",
+      "protocol": "http"
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "${VLESS_ADDRESS}",
+            "port": ${VLESS_PORT},
+            "users": [
+              {
+                "id": "${VLESS_UUID}",
+                "encryption": "none",
+                "level": 0
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "${VLESS_SNI}",
+          "fingerprint": "chrome",
+          "alpn": ["http/1.1"]
+        },
+        "wsSettings": {
+          "path": "${VLESS_PATH}",
+          "headers": {
+            "Host": "${VLESS_HOST}"
+          }
+        }
+      }
+    }
+  ]
+}
+EOF
+  
+  log "Starting Xray service..."
+  systemctl enable xray &>/dev/null
+  systemctl restart xray
+  
+  if systemctl is-active --quiet xray; then
+    log "Xray is running successfully."
+  else
+    err "Failed to start Xray. Check: systemctl status xray"
+  fi
+  
+  log "Testing proxy connection..."
+  if curl --proxy socks5://127.0.0.1:1080 -s --connect-timeout 10 https://www.google.com -I &>/dev/null; then
+    log "Proxy is working! ✓"
+  else
+    warn "Proxy test failed. Check Xray config: /usr/local/etc/xray/config.json"
+  fi
+fi
 
 # ── Node.js ───────────────────────────────────────────────────────────────────────────────
 if command -v node &>/dev/null; then
@@ -166,6 +307,9 @@ ALLOWED_USERS=${ALLOWED_USERS}
 
 # Download concurrency (parallel image downloads per gallery)
 DOWNLOAD_CONCURRENCY=${DOWNLOAD_CONCURRENCY}
+
+# Proxy (leave empty to disable)
+PROXY_URL=${PROXY_URL}
 EOF
 
 chmod 600 "$INSTALL_DIR/.env"
@@ -199,9 +343,18 @@ echo -e "  Install dir: ${INSTALL_DIR}"
 echo -e "  Downloads  : ${DOWNLOADS_DIR}"
 echo -e "  Download URL: ${DOWNLOAD_BASE_URL}"
 echo -e "  Concurrency: ${DOWNLOAD_CONCURRENCY}"
+if [[ "$INSTALL_PROXY" =~ ^[Yy]$ ]]; then
+  echo -e "  Proxy      : Enabled (${PROXY_URL})"
+else
+  echo -e "  Proxy      : Disabled"
+fi
 echo ""
 echo -e "  Useful commands:"
 echo -e "    pm2 logs gallery-bot     # view live logs"
 echo -e "    pm2 restart gallery-bot  # restart bot"
 echo -e "    pm2 stop gallery-bot     # stop bot"
+if [[ "$INSTALL_PROXY" =~ ^[Yy]$ ]]; then
+  echo -e "    systemctl status xray    # check Xray status"
+  echo -e "    systemctl restart xray   # restart Xray"
+fi
 echo ""
