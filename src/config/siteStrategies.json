@@ -29,9 +29,9 @@
   "pornpics.com": {
     "name": "Pornpics",
     "images": {
-      "selector": "a[itemprop='contentUrl']",
+      "selector": "a[href*='cdn'][href$='.jpg']",
       "attr": "href",
-      "filterPatterns": [".webp", "_.", "masonry", "thumb", "-150x"]
+      "filterPatterns": ["thumb", "_w400", "_w600", "masonry", "logo"]
     }
   }
 }
