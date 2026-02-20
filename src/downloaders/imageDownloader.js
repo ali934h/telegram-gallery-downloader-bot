@@ -6,17 +6,38 @@
 const axios = require('axios');
 const fs = require('fs').promises;
 const path = require('path');
+const { SocksProxyAgent } = require('socks-proxy-agent');
 const Logger = require('../utils/logger');
 
 class ImageDownloader {
+  /**
+   * Get proxy agent if PROXY_URL is set
+   */
+  static getProxyAgent() {
+    const proxyUrl = process.env.PROXY_URL;
+    if (!proxyUrl) return null;
+
+    try {
+      if (proxyUrl.startsWith('socks://') || proxyUrl.startsWith('socks5://')) {
+        return new SocksProxyAgent(proxyUrl);
+      }
+      return null;
+    } catch (error) {
+      Logger.warn(`Invalid proxy URL: ${proxyUrl}`, { error: error.message });
+      return null;
+    }
+  }
+
   static async downloadImage(url, outputPath, retries = 3, signal = null) {
+    const proxyAgent = this.getProxyAgent();
+
     for (let attempt = 1; attempt <= retries; attempt++) {
       if (signal && signal.aborted) return false;
 
       try {
         Logger.debug(`Downloading image (attempt ${attempt}/${retries}): ${url}`);
 
-        const response = await axios({
+        const axiosConfig = {
           method: 'GET',
           url,
           responseType: 'arraybuffer',
@@ -28,7 +49,15 @@ class ImageDownloader {
           timeout: 30000,
           maxRedirects: 5,
           signal: signal || undefined
-        });
+        };
+
+        // Add proxy if available
+        if (proxyAgent) {
+          axiosConfig.httpAgent = proxyAgent;
+          axiosConfig.httpsAgent = proxyAgent;
+        }
+
+        const response = await axios(axiosConfig);
 
         await fs.writeFile(outputPath, response.data);
         return true;
