@@ -32,17 +32,22 @@ class JsdomScraper {
   }
 
   /**
-   * Get proxy agent if PROXY_URL is set
+   * Get proxy agent if PROXY_URL is set and strategy requires it
+   * @param {boolean} useProxy - Whether this strategy requires proxy
    */
-  static getProxyAgent() {
+  static getProxyAgent(useProxy = false) {
+    if (!useProxy) return null;
+
     const proxyUrl = process.env.PROXY_URL;
-    if (!proxyUrl) return null;
+    if (!proxyUrl) {
+      Logger.warn('Strategy requires proxy but PROXY_URL is not set');
+      return null;
+    }
 
     try {
       if (proxyUrl.startsWith('socks://') || proxyUrl.startsWith('socks5://')) {
         return new SocksProxyAgent(proxyUrl);
       }
-      // For http/https proxies, axios handles it via httpsAgent
       return null;
     } catch (error) {
       Logger.warn(`Invalid proxy URL: ${proxyUrl}`, { error: error.message });
@@ -52,8 +57,12 @@ class JsdomScraper {
 
   /**
    * Fetch HTML content from URL with optional custom headers and proxy
+   * @param {string} url - URL to fetch
+   * @param {Object} customHeaders - Optional custom headers from strategy
+   * @param {boolean} useProxy - Whether to use proxy for this request
+   * @param {number} retries - Number of retry attempts
    */
-  static async fetchHTML(url, customHeaders = {}, retries = 3) {
+  static async fetchHTML(url, customHeaders = {}, useProxy = false, retries = 3) {
     const headers = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -66,7 +75,7 @@ class JsdomScraper {
       ...customHeaders
     };
 
-    const proxyAgent = this.getProxyAgent();
+    const proxyAgent = this.getProxyAgent(useProxy);
     const axiosConfig = {
       headers,
       timeout: 30000,
@@ -78,7 +87,7 @@ class JsdomScraper {
     if (proxyAgent) {
       axiosConfig.httpAgent = proxyAgent;
       axiosConfig.httpsAgent = proxyAgent;
-      Logger.debug(`Using proxy: ${process.env.PROXY_URL}`);
+      Logger.debug(`Using proxy for: ${url}`);
     }
 
     for (let attempt = 1; attempt <= retries; attempt++) {
@@ -131,7 +140,8 @@ class JsdomScraper {
       Logger.info(`Extracting images from gallery: ${url}`);
       
       const customHeaders = strategy.headers || {};
-      const html = await this.fetchHTML(url, customHeaders);
+      const useProxy = strategy.useProxy || false;
+      const html = await this.fetchHTML(url, customHeaders, useProxy);
       
       const dom = new JSDOM(html);
       const document = dom.window.document;

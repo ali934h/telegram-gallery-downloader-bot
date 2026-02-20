@@ -11,11 +11,17 @@ const Logger = require('../utils/logger');
 
 class ImageDownloader {
   /**
-   * Get proxy agent if PROXY_URL is set
+   * Get proxy agent if PROXY_URL is set and useProxy is true
+   * @param {boolean} useProxy - Whether to use proxy for this download
    */
-  static getProxyAgent() {
+  static getProxyAgent(useProxy = false) {
+    if (!useProxy) return null;
+
     const proxyUrl = process.env.PROXY_URL;
-    if (!proxyUrl) return null;
+    if (!proxyUrl) {
+      Logger.warn('Download requires proxy but PROXY_URL is not set');
+      return null;
+    }
 
     try {
       if (proxyUrl.startsWith('socks://') || proxyUrl.startsWith('socks5://')) {
@@ -28,8 +34,8 @@ class ImageDownloader {
     }
   }
 
-  static async downloadImage(url, outputPath, retries = 3, signal = null) {
-    const proxyAgent = this.getProxyAgent();
+  static async downloadImage(url, outputPath, useProxy = false, retries = 3, signal = null) {
+    const proxyAgent = this.getProxyAgent(useProxy);
 
     for (let attempt = 1; attempt <= retries; attempt++) {
       if (signal && signal.aborted) return false;
@@ -93,10 +99,11 @@ class ImageDownloader {
   }
 
   /**
+   * @param {boolean} [useProxy] - Whether to use proxy for downloads
    * @param {AbortSignal} [signal]
    * @param {number} [concurrency] - Max parallel downloads (default 5)
    */
-  static async downloadImages(urls, outputDir, concurrency = 5, progressCallback = null, signal = null) {
+  static async downloadImages(urls, outputDir, useProxy = false, concurrency = 5, progressCallback = null, signal = null) {
     Logger.info(`Starting download of ${urls.length} images with concurrency ${concurrency}`);
 
     const results = { total: urls.length, success: 0, failed: 0, files: [] };
@@ -112,7 +119,7 @@ class ImageDownloader {
         const filename = this.generateFilename(url, index);
         const outputPath = path.join(outputDir, filename);
 
-        const success = await this.downloadImage(url, outputPath, 3, signal);
+        const success = await this.downloadImage(url, outputPath, useProxy, 3, signal);
 
         if (success) {
           results.success++;
@@ -165,9 +172,13 @@ class ImageDownloader {
       const galleryDir = path.join(baseOutputDir, gallery.name);
       await fs.mkdir(galleryDir, { recursive: true });
 
+      // Use proxy setting from gallery (passed from strategy)
+      const useProxy = gallery.useProxy || false;
+
       const galleryResult = await this.downloadImages(
         gallery.urls,
         galleryDir,
+        useProxy,
         concurrency,
         (progress) => {
           if (progressCallback) {
