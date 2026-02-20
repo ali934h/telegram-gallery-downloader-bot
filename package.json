@@ -24,7 +24,8 @@
     "dotenv": "^16.4.1",
     "axios": "^1.6.7",
     "jsdom": "^24.0.0",
-    "archiver": "^7.0.1"
+    "archiver": "^7.0.1",
+    "socks-proxy-agent": "^8.0.2"
   },
   "devDependencies": {
     "nodemon": "^3.0.3"

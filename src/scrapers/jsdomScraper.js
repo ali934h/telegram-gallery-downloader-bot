@@ -6,20 +6,17 @@
 
 const axios = require('axios');
 const { JSDOM } = require('jsdom');
+const { SocksProxyAgent } = require('socks-proxy-agent');
 const Logger = require('../utils/logger');
 
 class JsdomScraper {
   /**
    * Resolve protocol-relative or relative URLs to absolute ones.
-   * e.g. "//s3.example.com/image.jpg" => "https://s3.example.com/image.jpg"
    */
   static resolveUrl(imgUrl, pageUrl) {
     if (!imgUrl) return null;
-    // Protocol-relative
     if (imgUrl.startsWith('//')) return 'https:' + imgUrl;
-    // Already absolute
     if (imgUrl.startsWith('http://') || imgUrl.startsWith('https://')) return imgUrl;
-    // Relative path — resolve against page origin
     try {
       return new URL(imgUrl, pageUrl).href;
     } catch (_) {
@@ -35,11 +32,26 @@ class JsdomScraper {
   }
 
   /**
-   * Fetch HTML content from URL with optional custom headers from strategy
-   * Includes retry logic for ECONNRESET and similar errors
-   * @param {string} url - URL to fetch
-   * @param {Object} customHeaders - Optional custom headers from strategy
-   * @param {number} retries - Number of retry attempts (default: 3)
+   * Get proxy agent if PROXY_URL is set
+   */
+  static getProxyAgent() {
+    const proxyUrl = process.env.PROXY_URL;
+    if (!proxyUrl) return null;
+
+    try {
+      if (proxyUrl.startsWith('socks://') || proxyUrl.startsWith('socks5://')) {
+        return new SocksProxyAgent(proxyUrl);
+      }
+      // For http/https proxies, axios handles it via httpsAgent
+      return null;
+    } catch (error) {
+      Logger.warn(`Invalid proxy URL: ${proxyUrl}`, { error: error.message });
+      return null;
+    }
+  }
+
+  /**
+   * Fetch HTML content from URL with optional custom headers and proxy
    */
   static async fetchHTML(url, customHeaders = {}, retries = 3) {
     const headers = {
@@ -51,20 +63,29 @@ class JsdomScraper {
       'Upgrade-Insecure-Requests': '1',
       'Cache-Control': 'no-cache',
       'Pragma': 'no-cache',
-      // Merge custom headers (overrides defaults)
       ...customHeaders
     };
+
+    const proxyAgent = this.getProxyAgent();
+    const axiosConfig = {
+      headers,
+      timeout: 30000,
+      maxRedirects: 5,
+      validateStatus: (status) => status >= 200 && status < 300
+    };
+
+    // Add proxy agent if available
+    if (proxyAgent) {
+      axiosConfig.httpAgent = proxyAgent;
+      axiosConfig.httpsAgent = proxyAgent;
+      Logger.debug(`Using proxy: ${process.env.PROXY_URL}`);
+    }
 
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
         Logger.debug(`Fetching HTML from: ${url} (attempt ${attempt}/${retries})`);
         
-        const response = await axios.get(url, {
-          headers,
-          timeout: 30000,
-          maxRedirects: 5,
-          validateStatus: (status) => status >= 200 && status < 300
-        });
+        const response = await axios.get(url, axiosConfig);
         
         Logger.debug(`HTML fetched successfully (${response.data.length} bytes)`);
         return response.data;
@@ -78,7 +99,7 @@ class JsdomScraper {
           (error.response && error.response.status >= 500);
 
         if (isRetryable && attempt < retries) {
-          const delay = 2000 * attempt; // 2s, 4s, 6s
+          const delay = 2000 * attempt;
           Logger.warn(`Request failed (${error.message}), retrying in ${delay}ms... (${attempt}/${retries})`);
           await this.sleep(delay);
           continue;
@@ -91,7 +112,7 @@ class JsdomScraper {
   }
 
   /**
-   * Filter out thumbnail and low-quality images based on patterns
+   * Filter out thumbnail and low-quality images
    */
   static filterImages(urls, filterPatterns = []) {
     if (!filterPatterns || filterPatterns.length === 0) return urls;
@@ -109,7 +130,6 @@ class JsdomScraper {
     try {
       Logger.info(`Extracting images from gallery: ${url}`);
       
-      // Use custom headers from strategy if available
       const customHeaders = strategy.headers || {};
       const html = await this.fetchHTML(url, customHeaders);
       
