@@ -1,45 +1,24 @@
 /**
  * ZIP Creator
- * Creates ZIP archives from directories using the system 'zip' command
- * Requires 'zip' to be installed on the server (apt install zip)
+ * Creates ZIP archives using the 'archiver' Node.js package.
+ * No system 'zip' binary required.
  */
 
-const { execFile } = require('child_process');
+const archiver = require('archiver');
 const path = require('path');
 const fs = require('fs');
 const Logger = require('../utils/logger');
 
 class ZipCreator {
   /**
-   * Run a shell command and return a promise
-   * @param {string} command - Command to execute
-   * @param {Array} args - Command arguments
-   * @param {Object} options - execFile options
-   * @returns {Promise<{stdout, stderr}>}
-   */
-  static runCommand(command, args, options = {}) {
-    return new Promise((resolve, reject) => {
-      execFile(command, args, options, (error, stdout, stderr) => {
-        if (error) {
-          reject(new Error(`Command failed: ${error.message}\nStderr: ${stderr}`));
-        } else {
-          resolve({ stdout, stderr });
-        }
-      });
-    });
-  }
-
-  /**
-   * Create a ZIP archive from a source directory
-   * The archive will contain all gallery subfolders with their images.
+   * Create a ZIP archive from a source directory.
    *
-   * @param {string} sourceDir - Directory containing gallery subfolders
-   * @param {string} archiveName - Base name for the output ZIP file (no extension)
-   * @param {string} outputDir - Directory to save the ZIP file
-   * @returns {Promise<string>} Full path to the created ZIP file
+   * @param {string} sourceDir   - Directory containing gallery subfolders
+   * @param {string} archiveName - Base name for the output ZIP (no extension)
+   * @param {string} outputDir   - Directory to save the ZIP file
+   * @returns {Promise<string>}  Full path to the created ZIP file
    */
   static async createZip(sourceDir, archiveName, outputDir) {
-    // Ensure output directory exists
     if (!fs.existsSync(outputDir)) {
       fs.mkdirSync(outputDir, { recursive: true });
     }
@@ -48,30 +27,35 @@ class ZipCreator {
     const zipFilePath = path.join(outputDir, zipFileName);
 
     Logger.info(`Creating ZIP archive: ${zipFileName}`);
-    Logger.debug(`Source directory: ${sourceDir}`);
-    Logger.debug(`Output path: ${zipFilePath}`);
 
-    try {
-      // zip -r <output.zip> . (run from inside sourceDir)
-      await this.runCommand(
-        'zip',
-        ['-r', zipFilePath, '.'],
-        { cwd: sourceDir }
-      );
+    return new Promise((resolve, reject) => {
+      const output = fs.createWriteStream(zipFilePath);
+      const archive = archiver('zip', { zlib: { level: 6 } });
 
-      // Verify the file was created
-      if (!fs.existsSync(zipFilePath)) {
-        throw new Error('ZIP file was not created');
-      }
+      output.on('close', () => {
+        const sizeMB = (archive.pointer() / 1024 / 1024).toFixed(2);
+        Logger.info(`ZIP archive created: ${zipFileName} (${sizeMB} MB)`);
+        resolve(zipFilePath);
+      });
 
-      const stats = fs.statSync(zipFilePath);
-      Logger.info(`ZIP archive created: ${zipFileName} (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
+      archive.on('warning', (err) => {
+        if (err.code === 'ENOENT') {
+          Logger.warn(`ZIP warning: ${err.message}`);
+        } else {
+          reject(err);
+        }
+      });
 
-      return zipFilePath;
-    } catch (error) {
-      Logger.error('Failed to create ZIP archive', { error: error.message });
-      throw error;
-    }
+      archive.on('error', (err) => {
+        Logger.error('Failed to create ZIP archive', { error: err.message });
+        reject(err);
+      });
+
+      archive.pipe(output);
+      // Add all contents of sourceDir recursively
+      archive.directory(sourceDir, false);
+      archive.finalize();
+    });
   }
 }
 

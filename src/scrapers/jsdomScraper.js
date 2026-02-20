@@ -10,14 +10,29 @@ const Logger = require('../utils/logger');
 
 class JsdomScraper {
   /**
+   * Resolve protocol-relative or relative URLs to absolute ones.
+   * e.g. "//s3.example.com/image.jpg" => "https://s3.example.com/image.jpg"
+   */
+  static resolveUrl(imgUrl, pageUrl) {
+    if (!imgUrl) return null;
+    // Protocol-relative
+    if (imgUrl.startsWith('//')) return 'https:' + imgUrl;
+    // Already absolute
+    if (imgUrl.startsWith('http://') || imgUrl.startsWith('https://')) return imgUrl;
+    // Relative path — resolve against page origin
+    try {
+      return new URL(imgUrl, pageUrl).href;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
    * Fetch HTML content from URL
-   * @param {string} url - URL to fetch
-   * @returns {string} HTML content
    */
   static async fetchHTML(url) {
     try {
       Logger.debug(`Fetching HTML from: ${url}`);
-
       const response = await axios.get(url, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -29,7 +44,6 @@ class JsdomScraper {
         },
         timeout: 30000
       });
-
       Logger.debug(`HTML fetched successfully (${response.data.length} bytes)`);
       return response.data;
     } catch (error) {
@@ -40,33 +54,22 @@ class JsdomScraper {
 
   /**
    * Filter out thumbnail and low-quality images based on patterns
-   * @param {Array} urls - Array of image URLs
-   * @param {Array} filterPatterns - Patterns to filter out
-   * @returns {Array} Filtered URLs
    */
   static filterImages(urls, filterPatterns = []) {
-    if (!filterPatterns || filterPatterns.length === 0) {
-      return urls;
-    }
-
-    const filtered = urls.filter(url => {
-      return !filterPatterns.some(pattern => url.includes(pattern));
-    });
-
+    if (!filterPatterns || filterPatterns.length === 0) return urls;
+    const filtered = urls.filter(url =>
+      !filterPatterns.some(pattern => url.includes(pattern))
+    );
     Logger.debug(`Filtered ${urls.length - filtered.length} images (${filtered.length} remaining)`);
     return filtered;
   }
 
   /**
    * Extract image URLs from gallery page
-   * @param {string} url - Gallery URL
-   * @param {Object} strategy - Strategy configuration for the site
-   * @returns {Array} Array of image URLs
    */
   static async extractImages(url, strategy) {
     try {
       Logger.info(`Extracting images from gallery: ${url}`);
-
       const html = await this.fetchHTML(url);
       const dom = new JSDOM(html);
       const document = dom.window.document;
@@ -79,10 +82,9 @@ class JsdomScraper {
 
       const urls = [];
       elements.forEach(element => {
-        const imgUrl = element.getAttribute(attr);
-        if (imgUrl) {
-          urls.push(imgUrl);
-        }
+        const raw = element.getAttribute(attr);
+        const resolved = this.resolveUrl(raw, url);
+        if (resolved) urls.push(resolved);
       });
 
       const filteredUrls = this.filterImages(urls, strategy.images.filterPatterns);
@@ -98,8 +100,6 @@ class JsdomScraper {
 
   /**
    * Extract gallery name from URL
-   * @param {string} url - Gallery URL
-   * @returns {string} Gallery name
    */
   static extractGalleryName(url) {
     try {
