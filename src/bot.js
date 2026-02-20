@@ -560,11 +560,16 @@ class TelegramBot {
         const galleryName = JsdomScraper.extractGalleryName(url);
         try {
           const imageUrls = await JsdomScraper.extractImages(url, strategy);
-          galleries.push({ name: galleryName, urls: imageUrls });
+          // Pass useProxy flag from strategy to gallery object
+          galleries.push({ 
+            name: galleryName, 
+            urls: imageUrls,
+            useProxy: strategy.useProxy || false 
+          });
           Logger.info(`Gallery ${i + 1}/${urls.length} extracted: ${galleryName} (${imageUrls.length} images)`);
         } catch (err) {
           Logger.warn(`Failed to extract gallery: ${url}`, { error: err.message });
-          galleries.push({ name: galleryName, urls: [] });
+          galleries.push({ name: galleryName, urls: [], useProxy: false });
         }
         await this.updateStatus(ctx, msgId,
           `Extracting images... (${i + 1}/${urls.length} galleries done)`,
