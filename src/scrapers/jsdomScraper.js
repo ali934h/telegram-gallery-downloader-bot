@@ -28,22 +28,31 @@ class JsdomScraper {
   }
 
   /**
-   * Fetch HTML content from URL
+   * Fetch HTML content from URL with optional custom headers from strategy
+   * @param {string} url - URL to fetch
+   * @param {Object} customHeaders - Optional custom headers from strategy
    */
-  static async fetchHTML(url) {
+  static async fetchHTML(url, customHeaders = {}) {
     try {
       Logger.debug(`Fetching HTML from: ${url}`);
+      
+      const headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        // Merge custom headers (overrides defaults)
+        ...customHeaders
+      };
+
       const response = await axios.get(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.5',
-          'Accept-Encoding': 'gzip, deflate',
-          'Connection': 'keep-alive',
-          'Upgrade-Insecure-Requests': '1'
-        },
-        timeout: 30000
+        headers,
+        timeout: 30000,
+        maxRedirects: 5
       });
+      
       Logger.debug(`HTML fetched successfully (${response.data.length} bytes)`);
       return response.data;
     } catch (error) {
@@ -70,7 +79,11 @@ class JsdomScraper {
   static async extractImages(url, strategy) {
     try {
       Logger.info(`Extracting images from gallery: ${url}`);
-      const html = await this.fetchHTML(url);
+      
+      // Use custom headers from strategy if available
+      const customHeaders = strategy.headers || {};
+      const html = await this.fetchHTML(url, customHeaders);
+      
       const dom = new JSDOM(html);
       const document = dom.window.document;
 
