@@ -73,6 +73,17 @@ class StrategyEngine {
   }
 
   /**
+   * Get all available strategies
+   * @returns {Object} All strategies
+   */
+  getAllStrategies() {
+    if (!this.loaded) {
+      throw new Error('Strategies not loaded. Call loadStrategies() first.');
+    }
+    return this.strategies;
+  }
+
+  /**
    * Get list of all supported domains
    * @returns {Array} Array of domain names
    */
@@ -95,6 +106,44 @@ class StrategyEngine {
     } catch (error) {
       return false;
     }
+  }
+
+  /**
+   * Try all strategies on a URL and return the first one that finds >= minImages
+   * @param {string} url - URL to test
+   * @param {Object} JsdomScraper - JsdomScraper class
+   * @param {number} minImages - Minimum number of images to consider success (default: 5)
+   * @returns {Promise<Object|null>} {strategy, images} or null if none worked
+   */
+  async findWorkingStrategy(url, JsdomScraper, minImages = 5) {
+    if (!this.loaded) {
+      throw new Error('Strategies not loaded. Call loadStrategies() first.');
+    }
+
+    const domain = this.extractDomain(url);
+    Logger.info(`Testing strategies for unsupported domain: ${domain}`);
+
+    const strategyEntries = Object.entries(this.strategies);
+
+    for (const [strategyDomain, strategy] of strategyEntries) {
+      try {
+        Logger.debug(`Testing ${strategy.name} strategy on ${domain}...`);
+        
+        const images = await JsdomScraper.extractImages(url, strategy);
+        
+        if (images && images.length >= minImages) {
+          Logger.info(`✓ Strategy '${strategy.name}' found ${images.length} images for ${domain}`);
+          return { strategy, images };
+        } else {
+          Logger.debug(`✗ Strategy '${strategy.name}' found only ${images ? images.length : 0} images (need ${minImages})`);
+        }
+      } catch (error) {
+        Logger.debug(`✗ Strategy '${strategy.name}' failed: ${error.message}`);
+      }
+    }
+
+    Logger.warn(`No working strategy found for ${domain} after testing ${strategyEntries.length} strategies`);
+    return null;
   }
 }
 

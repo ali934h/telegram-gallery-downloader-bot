@@ -213,8 +213,9 @@ class TelegramBot {
         'Commands:\n' +
         '  /files - Manage downloaded ZIP files\n' +
         '  /help  - How to use\n\n' +
-        'Supported sites:\n' +
-        strategyEngine.getSupportedDomains().map(d => `  - ${d}`).join('\n')
+        'Officially supported sites:\n' +
+        strategyEngine.getSupportedDomains().map(d => `  - ${d}`).join('\n') + '\n\n' +
+        '⚡ Auto-detection: I can also try to extract images from similar sites automatically!'
       );
     });
 
@@ -228,8 +229,9 @@ class TelegramBot {
         'Commands:\n' +
         '  /files  - View and manage downloaded ZIP files\n' +
         '  /cancel - Cancel current operation\n\n' +
-        'Supported sites:\n' +
-        strategyEngine.getSupportedDomains().map(d => `  - ${d}`).join('\n')
+        'Officially supported sites:\n' +
+        strategyEngine.getSupportedDomains().map(d => `  - ${d}`).join('\n') + '\n\n' +
+        '⚡ Auto-detection: I can also try to extract images from similar sites automatically!'
       );
     });
 
@@ -504,16 +506,7 @@ class TelegramBot {
         return;
       }
 
-      const unsupported = lines.filter(url => !strategyEngine.isSupported(url));
-      if (unsupported.length > 0) {
-        ctx.reply(
-          `The following URLs are not supported:\n${unsupported.map(u => `  - ${u}`).join('\n')}\n\n` +
-          'Supported sites:\n' +
-          strategyEngine.getSupportedDomains().map(d => `  - ${d}`).join('\n')
-        );
-        return;
-      }
-
+      // No more strict validation - we'll try fallback strategies
       const defaultName = this.buildDefaultName(lines);
       session.pendingJob = { urls: lines, archiveName: defaultName };
       session.state = STATE.IDLE;
@@ -552,36 +545,79 @@ class TelegramBot {
       );
 
       const galleries = [];
+      const unsupportedUrls = [];
+
       for (let i = 0; i < urls.length; i++) {
         if (signal.aborted) break;
 
         const url = urls[i];
-        const strategy = strategyEngine.getStrategy(url);
+        let strategy = strategyEngine.getStrategy(url);
         const galleryName = JsdomScraper.extractGalleryName(url);
+        
         try {
-          const imageUrls = await JsdomScraper.extractImages(url, strategy);
-          // Pass useProxy flag from strategy to gallery object
+          let imageUrls = [];
+          
+          // Try direct strategy first
+          if (strategy) {
+            imageUrls = await JsdomScraper.extractImages(url, strategy);
+          }
+          
+          // If no direct strategy or failed to find images, try fallback
+          if (!strategy || imageUrls.length === 0) {
+            Logger.info(`Trying fallback strategies for: ${url}`);
+            await this.updateStatus(ctx, msgId,
+              `Testing extraction methods for gallery ${i + 1}/${urls.length}...\n(This may take a moment)`,
+              cancelKeyboard
+            );
+            
+            const result = await strategyEngine.findWorkingStrategy(url, JsdomScraper, 5);
+            
+            if (result) {
+              strategy = result.strategy;
+              imageUrls = result.images;
+              Logger.info(`✓ Found working strategy for ${url}: ${strategy.name}`);
+            } else {
+              Logger.warn(`No working strategy found for: ${url}`);
+              unsupportedUrls.push(url);
+              galleries.push({ name: galleryName, urls: [], useProxy: false });
+              continue;
+            }
+          }
+          
           galleries.push({ 
             name: galleryName, 
             urls: imageUrls,
             useProxy: strategy.useProxy || false 
           });
+          
           Logger.info(`Gallery ${i + 1}/${urls.length} extracted: ${galleryName} (${imageUrls.length} images)`);
         } catch (err) {
           Logger.warn(`Failed to extract gallery: ${url}`, { error: err.message });
+          unsupportedUrls.push(url);
           galleries.push({ name: galleryName, urls: [], useProxy: false });
         }
+        
         await this.updateStatus(ctx, msgId,
           `Extracting images... (${i + 1}/${urls.length} galleries done)`,
           cancelKeyboard
         );
       }
 
+      // If some URLs were unsupported, notify user
+      if (unsupportedUrls.length > 0) {
+        const warningMsg = 
+          `⚠️ Could not extract images from ${unsupportedUrls.length} URL(s).\n` +
+          'Continuing with successful galleries...';
+        await ctx.reply(warningMsg).catch(() => {});
+      }
+
       const totalImages = galleries.reduce((sum, g) => sum + g.urls.length, 0);
-      if (totalImages === 0) throw new Error('No images found in any of the provided galleries.');
+      if (totalImages === 0) {
+        throw new Error('No images found in any of the provided galleries. Please check your URLs.');
+      }
 
       await this.updateStatus(ctx, msgId,
-        `Found ${totalImages} images across ${galleries.length} ${galleries.length === 1 ? 'gallery' : 'galleries'}.\nDownloading...`,
+        `Found ${totalImages} images across ${galleries.filter(g => g.urls.length > 0).length} ${galleries.length === 1 ? 'gallery' : 'galleries'}.\nDownloading...`,
         cancelKeyboard
       );
 
@@ -589,7 +625,7 @@ class TelegramBot {
       let lastUpdateTime = 0;
 
       const downloadResult = await ImageDownloader.downloadMultipleGalleries(
-        galleries,
+        galleries.filter(g => g.urls.length > 0), // Only download galleries with images
         tempDir,
         (progress) => {
           const now = Date.now();
